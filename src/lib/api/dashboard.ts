@@ -1,15 +1,15 @@
 import "server-only";
-import { db } from "@/lib/db/store";
-import { simulateLatency } from "./latency";
-import { getTaskCountsForEmployee, getRecentTasksForEmployee } from "./tasks";
+
+import { getTaskCountsForEmployee, getRecentTasksForEmployee, type TaskCounts } from "./tasks";
 import { getTodayRecordForEmployee, getEmployeeMonthlySummary } from "./attendance";
 import { getSalaryForMonth, getEarningsSummary } from "./salary";
 import { getLeaveBalance, listLeavesForEmployee } from "./leaves";
 import { listNoticesForEmployee, getUnreadNoticeCount } from "./announcements";
+import { getEmployeeById } from "./employees";
 import { currentMonth } from "@/lib/format";
 import { requireRole } from "@/lib/auth/service";
 import type { AuthUser } from "@/types/auth";
-import type { TaskCounts } from "./tasks";
+import type { Employee } from "@/types/employee";
 
 export interface EmployeeDashboardData {
   user: AuthUser;
@@ -44,9 +44,16 @@ const STATUS_PRESENTATION: Record<
   leave: { label: "On Leave", tone: "info" },
 };
 
+/**
+ * Assembles the employee dashboard.
+ *
+ * This module orchestrates and joins nothing itself — every figure comes from a
+ * service in `src/lib/api/*`, which keeps the queries in one place and means
+ * the dashboard and the detail pages can never disagree. The fan-out below
+ * issues its queries concurrently against a single pooled connection.
+ */
 export async function getEmployeeDashboardData(): Promise<EmployeeDashboardData> {
   const user = await requireRole("employee");
-  await simulateLatency(160);
 
   const month = currentMonth();
   const [todayRecord, summary, taskCounts, recentTasks, leaveBalance, recentLeaves, salary, earnings, notices, unread] =
@@ -100,6 +107,6 @@ export function greetingForHour(hour: number): string {
   return "Good Evening";
 }
 
-export function getEmployeeRecord(employeeId: string) {
-  return db.employees.find((e) => e.id === employeeId) ?? null;
+export async function getEmployeeRecord(employeeId: string): Promise<Employee | null> {
+  return getEmployeeById(employeeId);
 }

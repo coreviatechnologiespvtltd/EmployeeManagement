@@ -1,7 +1,14 @@
 import { z } from "zod";
-import { DEPARTMENTS, POSITIONS } from "@/lib/constants";
+import { POSITIONS } from "@/lib/constants";
 
 const roleSchema = z.enum(["employee", "admin"]);
+
+// Departments now live in the `departments` table, so membership is validated
+// by the database rather than by a hardcoded array. The check below is only a
+// fast, friendly form-level guard; `createEmployee` rejects unknown values too.
+// Positions remain a closed set because they are titles rather than records.
+const departmentSchema = z.string().trim().min(1, "Select a department.");
+const positionSchema = z.enum(POSITIONS, { message: "Select a position." });
 
 export const registerStaffSchema = z
   .object({
@@ -19,8 +26,8 @@ export const registerStaffSchema = z
       .min(7, "Enter a valid phone number.")
       .max(20, "Phone number is too long."),
     address: z.string().trim().min(5, "Enter a full address."),
-    department: z.enum(DEPARTMENTS, { message: "Select a department." }),
-    position: z.enum(POSITIONS, { message: "Select a position." }),
+    department: departmentSchema,
+    position: positionSchema,
     joiningDate: z.string().min(1, "Joining date is required."),
     basicSalary: z.coerce
       .number({ message: "Enter a valid amount." })
@@ -47,8 +54,8 @@ export const editStaffSchema = z.object({
   email: z.string().trim().email("Enter a valid email address."),
   phone: z.string().trim().min(7, "Enter a valid phone number."),
   address: z.string().trim().min(5, "Enter a full address."),
-  department: z.enum(DEPARTMENTS, { message: "Select a department." }),
-  position: z.enum(POSITIONS, { message: "Select a position." }),
+  department: departmentSchema,
+  position: positionSchema,
   joiningDate: z.string().min(1, "Joining date is required."),
   basicSalary: z.coerce.number().min(0, "Salary cannot be negative."),
   role: roleSchema,

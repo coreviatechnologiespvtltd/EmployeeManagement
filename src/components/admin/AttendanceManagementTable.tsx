@@ -30,10 +30,15 @@ export function AttendanceManagementTable({
   records,
   availableDates,
   selectedDate,
+  defaultCheckIn,
+  defaultCheckOut,
 }: {
   records: AttendanceRecord[];
   availableDates: string[];
   selectedDate: string;
+  /** Standard working day from `company_settings`, used when times are missing. */
+  defaultCheckIn: string;
+  defaultCheckOut: string;
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
@@ -176,16 +181,27 @@ export function AttendanceManagementTable({
         </div>
       )}
 
-      {editing && <CorrectAttendanceModal record={editing} onClose={() => setEditing(null)} />}
+      {editing && (
+        <CorrectAttendanceModal
+          record={editing}
+          defaultCheckIn={defaultCheckIn}
+          defaultCheckOut={defaultCheckOut}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </>
   );
 }
 
 function CorrectAttendanceModal({
   record,
+  defaultCheckIn,
+  defaultCheckOut,
   onClose,
 }: {
   record: AttendanceRecord;
+  defaultCheckIn: string;
+  defaultCheckOut: string;
   onClose: () => void;
 }) {
   const router = useRouter();
@@ -216,8 +232,8 @@ function CorrectAttendanceModal({
     setServerError(undefined);
     const result = await correctAttendanceAction({
       ...values,
-      checkIn: needsTimes ? `${record.date}T${values.checkIn || "09:00"}` : "",
-      checkOut: needsTimes ? `${record.date}T${values.checkOut || "18:00"}` : "",
+      checkIn: needsTimes ? `${record.date}T${values.checkIn || defaultCheckIn}` : "",
+      checkOut: needsTimes ? `${record.date}T${values.checkOut || defaultCheckOut}` : "",
     });
 
     if (result.success) {

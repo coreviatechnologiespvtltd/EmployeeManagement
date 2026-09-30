@@ -1,10 +1,18 @@
 import "server-only";
-import { db } from "@/lib/db/store";
+
+import { and, asc, count, desc, eq, ilike, sql } from "drizzle-orm";
+import { db } from "@/lib/db/client";
+import { attendanceSelection } from "@/lib/db/selects";
+import { likePattern, monthRange } from "@/lib/db/query-helpers";
+import { attendanceRecords, departments, employees } from "@/lib/db/schema";
+import { toAttendanceRecord, toNumber } from "@/lib/db/mappers";
 import { requireActionRole } from "@/lib/auth/actions";
-import { simulateLatency } from "./latency";
-import { buildSummary } from "@/lib/db/seed/attendance";
 import { currentMonth, monthLabel, today } from "@/lib/format";
-import type { AttendanceRecord, AttendanceStatus, MonthlyAttendanceSummary } from "@/types/attendance";
+import type {
+  AttendanceRecord,
+  AttendanceStatus,
+  MonthlyAttendanceSummary,
+} from "@/types/attendance";
 
 export interface AttendanceFilters {
   query?: string;
@@ -14,130 +22,288 @@ export interface AttendanceFilters {
   department?: string;
 }
 
-function summarise(records: AttendanceRecord[], month: string): MonthlyAttendanceSummary {
-  return buildSummary(records, month);
+const searchBlob = sql`concat_ws(' ', ${employees.fullName}, ${employees.id}, ${departments.name})`;
+
+/**
+ * Conditional aggregation for one month of attendance. `count(*) filter (...)`
+ * is the idiomatic Postgres way to get a per-status breakdown in a single row.
+ */
+function summarySelection() {
+  return {
+    total: count(),
+    present: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'present')`,
+    absent: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'absent')`,
+    late: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'late')`,
+    halfDay: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'half_day')`,
+    leave: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'leave')`,
+    totalHours: sql<string>`coalesce(sum(${attendanceRecords.workingHours}), 0)`,
+    hoursCount: sql<number>`count(${attendanceRecords.workingHours})`,
+  };
+}
+
+interface SummaryRow {
+  total?: number | null;
+  present?: number | null;
+  absent?: number | null;
+  late?: number | null;
+  halfDay?: number | null;
+  leave?: number | null;
+  totalHours?: string | number | null;
+  hoursCount?: number | null;
+}
+
+function summarise(row: SummaryRow | undefined, month: string): MonthlyAttendanceSummary {
+  const totalHours = toNumber(row?.totalHours);
+  const hoursCount = toNumber(row?.hoursCount);
+
+  return {
+    month,
+    monthLabel: monthLabel(month),
+    present: toNumber(row?.present),
+    absent: toNumber(row?.absent),
+    late: toNumber(row?.late),
+    halfDay: toNumber(row?.halfDay),
+    leave: toNumber(row?.leave),
+    totalWorkingDays: toNumber(row?.total),
+    totalHours: Number(totalHours.toFixed(1)),
+    averageHours: hoursCount > 0 ? Number((totalHours / hoursCount).toFixed(2)) : 0,
+  };
 }
 
 export async function getTodayRecordForEmployee(employeeId: string): Promise<AttendanceRecord | null> {
-  await simulateLatency(120);
-  return (
-    db.attendance.find((r) => r.employeeId === employeeId && r.date === today()) ?? null
-  );
+  const rows = await db
+    .select(attendanceSelection)
+    .from(attendanceRecords)
+    .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .where(and(eq(attendanceRecords.employeeId, employeeId), eq(attendanceRecords.workDate, today())))
+    .limit(1);
+
+  const row = rows[0];
+  return row ? toAttendanceRecord(row) : null;
 }
 
 export async function getEmployeeAttendance(
   employeeId: string,
   month: string = currentMonth(),
 ): Promise<AttendanceRecord[]> {
-  await simulateLatency(200);
-  return db.attendance
-    .filter((r) => r.employeeId === employeeId && r.date.startsWith(month))
-    .sort((a, b) => (a.date < b.date ? 1 : -1));
+  const { start, end } = monthRange(month);
+
+  const rows = await db
+    .select(attendanceSelection)
+    .from(attendanceRecords)
+    .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .where(
+      and(
+        eq(attendanceRecords.employeeId, employeeId),
+        sql`${attendanceRecords.workDate} >= ${start}`,
+        sql`${attendanceRecords.workDate} < ${end}`,
+      ),
+    )
+    .orderBy(desc(attendanceRecords.workDate));
+
+  return rows.map(toAttendanceRecord);
 }
 
 export async function getEmployeeMonthlySummary(
   employeeId: string,
   month: string = currentMonth(),
 ): Promise<MonthlyAttendanceSummary> {
-  await simulateLatency(140);
-  const records = db.attendance.filter((r) => r.employeeId === employeeId && r.date.startsWith(month));
-  return summarise(records, month);
+  const { start, end } = monthRange(month);
+
+  const rows = await db
+    .select(summarySelection())
+    .from(attendanceRecords)
+    .where(
+      and(
+        eq(attendanceRecords.employeeId, employeeId),
+        sql`${attendanceRecords.workDate} >= ${start}`,
+        sql`${attendanceRecords.workDate} < ${end}`,
+      ),
+    );
+
+  return summarise(rows[0], month);
 }
 
+/**
+ * The last `months` months, including months with no rows at all, which the
+ * mock produced by looping. A single grouped query reads the data once and the
+ * gaps are filled in here.
+ */
 export async function getAttendanceTrend(
   employeeId: string,
   months: number,
 ): Promise<MonthlyAttendanceSummary[]> {
-  await simulateLatency(180);
-  const out: MonthlyAttendanceSummary[] = [];
+  const keys: string[] = [];
   const now = new Date();
   for (let i = months - 1; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-    const records = db.attendance.filter((r) => r.employeeId === employeeId && r.date.startsWith(key));
-    out.push(summarise(records, key));
+    keys.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
   }
-  return out;
+
+  const first = keys[0]!;
+  const { start } = monthRange(first);
+
+  const rows = await db
+    .select({ month: sql<string>`to_char(${attendanceRecords.workDate}, 'YYYY-MM')`, ...summarySelection() })
+    .from(attendanceRecords)
+    .where(and(eq(attendanceRecords.employeeId, employeeId), sql`${attendanceRecords.workDate} >= ${start}`))
+    .groupBy(sql`to_char(${attendanceRecords.workDate}, 'YYYY-MM')`);
+
+  const byMonth = new Map(rows.map((row) => [row.month, row]));
+
+  return keys.map((key) => summarise(byMonth.get(key), key));
+}
+
+function buildFilters(filters: AttendanceFilters) {
+  const conditions = [];
+
+  if (filters.query) {
+    conditions.push(ilike(searchBlob, likePattern(filters.query)));
+  }
+  if (filters.date) {
+    conditions.push(eq(attendanceRecords.workDate, filters.date));
+  } else if (filters.month && filters.month !== "all") {
+    const { start, end } = monthRange(filters.month);
+    conditions.push(
+      sql`${attendanceRecords.workDate} >= ${start}`,
+      sql`${attendanceRecords.workDate} < ${end}`,
+    );
+  }
+  if (filters.status && filters.status !== "all") {
+    conditions.push(eq(attendanceRecords.status, filters.status));
+  }
+  if (filters.department && filters.department !== "all") {
+    conditions.push(eq(departments.name, filters.department));
+  }
+
+  return conditions.length > 0 ? and(...conditions) : undefined;
 }
 
 export async function getAllAttendance(filters: AttendanceFilters = {}): Promise<AttendanceRecord[]> {
-  await simulateLatency(220);
-  let result = [...db.attendance];
+  const rows = await db
+    .select(attendanceSelection)
+    .from(attendanceRecords)
+    .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .where(buildFilters(filters))
+    .orderBy(desc(attendanceRecords.workDate), asc(employees.fullName));
 
-  if (filters.query) {
-    const q = filters.query.toLowerCase();
-    result = result.filter((r) =>
-      [r.employeeName, r.employeeId, r.department].join(" ").toLowerCase().includes(q),
-    );
-  }
-  const dateFilter = filters.date;
-  const monthFilter = filters.month;
-  if (dateFilter) {
-    result = result.filter((r) => r.date === dateFilter);
-  } else if (monthFilter) {
-    result = result.filter((r) => r.date.startsWith(monthFilter));
-  }
-  if (filters.status && filters.status !== "all") {
-    result = result.filter((r) => r.status === filters.status);
-  }
-  if (filters.department && filters.department !== "all") {
-    result = result.filter((r) => r.department === filters.department);
-  }
+  return rows.map(toAttendanceRecord);
+}
 
-  return result.sort(
-    (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.employeeName.localeCompare(b.employeeName)),
-  );
+/**
+ * Every date that has at least one record, for the date picker on the admin
+ * attendance register.
+ *
+ * This replaces the previous approach of loading the entire attendance table
+ * and de-duplicating it in JavaScript, which pulled roughly a thousand rows to
+ * build a list of dates.
+ */
+export async function getAttendanceDates(): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ date: attendanceRecords.workDate })
+    .from(attendanceRecords)
+    .orderBy(desc(attendanceRecords.workDate));
+
+  return rows.map((row) => row.date);
 }
 
 export async function getTodaysAttendance(): Promise<AttendanceRecord[]> {
-  await simulateLatency(160);
-  return db.attendance
-    .filter((r) => r.date === today())
-    .sort((a, b) => a.employeeName.localeCompare(b.employeeName));
+  return getAllAttendance({ date: today() });
 }
 
 export async function getTodaysAttendanceStats() {
-  const records = await getTodaysAttendance();
+  const rows = await db
+    .select({
+      present: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'present')`,
+      late: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'late')`,
+      absent: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'absent')`,
+      halfDay: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'half_day')`,
+      leave: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'leave')`,
+      total: count(),
+    })
+    .from(attendanceRecords)
+    .where(eq(attendanceRecords.workDate, today()));
+
+  const row = rows[0];
   return {
-    present: records.filter((r) => r.status === "present").length,
-    late: records.filter((r) => r.status === "late").length,
-    absent: records.filter((r) => r.status === "absent").length,
-    halfDay: records.filter((r) => r.status === "half_day").length,
-    leave: records.filter((r) => r.status === "leave").length,
-    total: records.length,
+    present: toNumber(row?.present),
+    late: toNumber(row?.late),
+    absent: toNumber(row?.absent),
+    halfDay: toNumber(row?.halfDay),
+    leave: toNumber(row?.leave),
+    total: toNumber(row?.total),
   };
 }
 
 export async function getDepartmentAttendanceBreakdown(date: string = today()) {
-  const records = await getAllAttendance({ date });
-  const map = new Map<string, { present: number; absent: number; late: number; leave: number; total: number }>();
-  for (const r of records) {
-    const entry = map.get(r.department) ?? { present: 0, absent: 0, late: 0, leave: 0, total: 0 };
-    if (r.status === "present") entry.present += 1;
-    else if (r.status === "late") entry.late += 1;
-    else if (r.status === "absent") entry.absent += 1;
-    else if (r.status === "leave") entry.leave += 1;
-    entry.total += 1;
-    map.set(r.department, entry);
-  }
-  return Array.from(map, ([department, stats]) => ({ department, ...stats }));
+  const rows = await db
+    .select({
+      department: departments.name,
+      present: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'present')`,
+      absent: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'absent')`,
+      late: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'late')`,
+      leave: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'leave')`,
+      total: count(),
+    })
+    .from(attendanceRecords)
+    .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .where(eq(attendanceRecords.workDate, date))
+    .groupBy(departments.name)
+    .orderBy(asc(departments.name));
+
+  return rows.map((row) => ({
+    department: row.department,
+    present: toNumber(row.present),
+    absent: toNumber(row.absent),
+    late: toNumber(row.late),
+    leave: toNumber(row.leave),
+    total: toNumber(row.total),
+  }));
 }
 
 export async function getMonthlySummaryForAll(month: string = currentMonth()) {
-  const records = await getAllAttendance({ month });
-  const summary = summarise(records, month);
-  return { ...summary, monthLabel: monthLabel(month), byDepartment: await getDepartmentBreakdown(month) };
-}
+  const { start, end } = monthRange(month);
 
-async function getDepartmentBreakdown(month: string) {
-  const records = await getAllAttendance({ month });
-  const map = new Map<string, number>();
-  for (const r of records) {
-    if (r.status === "present" || r.status === "late") {
-      map.set(r.department, (map.get(r.department) ?? 0) + 1);
-    }
-  }
-  return Array.from(map, ([department, presentDays]) => ({ department, presentDays }));
+  const [rows, breakdown] = await Promise.all([
+    db
+      .select(summarySelection())
+      .from(attendanceRecords)
+      .where(
+        and(
+          sql`${attendanceRecords.workDate} >= ${start}`,
+          sql`${attendanceRecords.workDate} < ${end}`,
+        ),
+      ),
+    db
+      .select({
+        department: departments.name,
+        presentDays: sql<number>`count(*) filter (where ${attendanceRecords.status} in ('present', 'late'))`,
+      })
+      .from(attendanceRecords)
+      .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+      .innerJoin(departments, eq(employees.departmentId, departments.id))
+      .where(
+        and(
+          sql`${attendanceRecords.workDate} >= ${start}`,
+          sql`${attendanceRecords.workDate} < ${end}`,
+        ),
+      )
+      .groupBy(departments.name)
+      .orderBy(asc(departments.name)),
+  ]);
+
+  return {
+    ...summarise(rows[0], month),
+    monthLabel: monthLabel(month),
+    byDepartment: breakdown.map((row) => ({
+      department: row.department,
+      presentDays: toNumber(row.presentDays),
+    })),
+  };
 }
 
 export interface CorrectAttendanceInput {
@@ -148,24 +314,53 @@ export interface CorrectAttendanceInput {
   remarks?: string;
 }
 
+/**
+ * Parses a local `YYYY-MM-DDTHH:mm` value from the correction form into a UTC
+ * ISO instant. Doing the conversion here rather than letting Postgres interpret
+ * the string keeps the result independent of the connection's TimeZone setting.
+ */
+function toInstant(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
 export async function correctAttendance(input: CorrectAttendanceInput): Promise<AttendanceRecord | null> {
   await requireActionRole("admin");
-  await simulateLatency(320);
 
-  const record = db.attendance.find((r) => r.id === input.recordId);
-  if (!record) return null;
+  const checkIn = toInstant(input.checkIn);
+  const checkOut = toInstant(input.checkOut);
 
-  record.status = input.status;
-  record.checkIn = input.checkIn ? new Date(input.checkIn).toISOString() : null;
-  record.checkOut = input.checkOut ? new Date(input.checkOut).toISOString() : null;
-  record.remarks = input.remarks?.trim() || undefined;
-
-  if (record.checkIn && record.checkOut) {
-    const hours = (new Date(record.checkOut).getTime() - new Date(record.checkIn).getTime()) / 3_600_000;
-    record.workingHours = hours > 0 ? Number(hours.toFixed(2)) : null;
-  } else {
-    record.workingHours = null;
+  let workingHours: number | null = null;
+  if (checkIn && checkOut) {
+    const hours = (new Date(checkOut).getTime() - new Date(checkIn).getTime()) / 3_600_000;
+    workingHours = hours > 0 ? Number(hours.toFixed(2)) : null;
   }
 
-  return record;
+  const updated = await db
+    .update(attendanceRecords)
+    .set({
+      status: input.status,
+      checkIn,
+      checkOut,
+      workingHours: workingHours === null ? null : String(workingHours),
+      remarks: input.remarks?.trim() || null,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(attendanceRecords.id, input.recordId))
+    .returning({ id: attendanceRecords.id });
+
+  if (updated.length === 0) return null;
+
+  const rows = await db
+    .select(attendanceSelection)
+    .from(attendanceRecords)
+    .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .where(eq(attendanceRecords.id, input.recordId))
+    .limit(1);
+
+  const row = rows[0];
+  return row ? toAttendanceRecord(row) : null;
 }

@@ -3,15 +3,15 @@
 import { useActionState } from "react";
 import { useFormStatus } from "react-dom";
 import { useState } from "react";
-import { AlertCircle, Eye, EyeOff, Lock, User, Loader2 } from "lucide-react";
+import { Eye, EyeOff, Lock, User, Loader2 } from "lucide-react";
 import { loginAction, type LoginState } from "@/lib/auth/actions";
 import { Button } from "@/components/ui/Button";
 import { FormErrorMessage } from "@/components/forms/FormActions";
 
-const DEMO_ACCOUNTS = [
-  { role: "Admin", username: "admin", password: "Admin@123" },
-  { role: "Employee", username: "employee", password: "Employee@123" },
-];
+// No credentials live in this file. The form authenticates against the
+// bcrypt hashes in PostgreSQL, so shipping an account list to the browser would
+// hand out working passwords. Demo credentials are printed by `npm run db:seed`
+// and documented in the README instead.
 
 function LoginSubmitButton() {
   const { pending } = useFormStatus();
@@ -103,27 +103,6 @@ export function LoginForm() {
 
       <LoginSubmitButton />
     </form>
-  );
-}
-
-export function DemoCredentialsHint() {
-  return (
-    <div className="rounded-xl border border-brand-100 bg-brand-50/60 p-4">
-      <p className="flex items-center gap-1.5 text-xs font-semibold text-brand-800">
-        <AlertCircle aria-hidden className="h-3.5 w-3.5" />
-        Demo credentials
-      </p>
-      <ul className="mt-2.5 space-y-1.5">
-        {DEMO_ACCOUNTS.map((account) => (
-          <li key={account.username} className="flex flex-wrap items-center justify-between gap-2 text-xs">
-            <span className="font-medium text-brand-800">{account.role}</span>
-            <code className="rounded bg-white px-1.5 py-0.5 font-mono text-[11px] text-ink-700 ring-1 ring-inset ring-brand-100">
-              {account.username} / {account.password}
-            </code>
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }
 

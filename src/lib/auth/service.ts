@@ -1,57 +1,128 @@
+import "server-only";
+
 import { cookies } from "next/headers";
 import { cache } from "react";
 import { redirect } from "next/navigation";
+import { eq, or, sql } from "drizzle-orm";
+import { db, describeDbError } from "@/lib/db/client";
+import { employees, userCredentials } from "@/lib/db/schema";
 import { SESSION_COOKIE_NAME } from "@/lib/constants";
 import { ROLE_HOME } from "@/lib/navigation";
-import { db } from "@/lib/db/store";
-import { createSession, destroySession, getSession } from "./session";
+import { verifyPassword } from "./password";
+import { createSession, destroyAllSessionsForUser, destroySession, getSession } from "./session";
 import type { AuthUser, LoginResult, Role } from "@/types/auth";
-import type { Employee } from "@/types/employee";
-
-function toAuthUser(employee: Employee): AuthUser {
-  return {
-    id: employee.id,
-    username: employee.username,
-    name: employee.fullName,
-    email: employee.email,
-    role: employee.role,
-  };
-}
 
 /**
- * Mock credential check. A production implementation would call
- * `POST /api/auth/login` and receive a token plus the user profile.
+ * Credential verification and session handling.
+ *
+ * Everything here is answered by PostgreSQL:
+ *  - the account is found by username *or* email, case-insensitively;
+ *  - the password is checked against the bcrypt hash in `user_credentials`;
+ *  - the role that gates every page and action is read from `employees.role`;
+ *  - the session is a row in `sessions`.
+ *
+ * There is no hardcoded account and no plaintext comparison anywhere.
  */
+
+/** Consecutive failures before the account is temporarily locked. */
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_MS = 15 * 60 * 1000;
+
+/** One message for every failure mode, so the form cannot be used to probe usernames. */
+const GENERIC_FAILURE = "Invalid username or password. Please try again.";
+
 export async function authenticateCredentials(
   identifier: string,
   password: string,
 ): Promise<{ user?: AuthUser; error?: string }> {
   const normalized = identifier.trim().toLowerCase();
 
-  const record = db.users.find(
-    (u) => u.username.toLowerCase() === normalized || u.employee.email.toLowerCase() === normalized,
-  );
+  const rows = await db
+    .select({
+      id: employees.id,
+      username: employees.username,
+      fullName: employees.fullName,
+      email: employees.email,
+      role: employees.role,
+      status: employees.status,
+      passwordHash: userCredentials.passwordHash,
+      failedAttempts: userCredentials.failedAttempts,
+      lockedUntil: userCredentials.lockedUntil,
+    })
+    .from(employees)
+    .innerJoin(userCredentials, eq(userCredentials.employeeId, employees.id))
+    .where(
+      or(
+        sql`lower(${employees.username}) = ${normalized}`,
+        sql`lower(${employees.email}) = ${normalized}`,
+      ),
+    )
+    .limit(1);
 
-  if (!record || record.password !== password) {
-    return { error: "Invalid username or password. Please try again." };
+  const record = rows[0];
+  if (!record) {
+    // Still spend time on a hash comparison so that a missing account and a
+    // wrong password take roughly the same wall-clock time.
+    await verifyPassword(password, "$2a$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinv");
+    return { error: GENERIC_FAILURE };
   }
 
-  const employee = db.employees.find((e) => e.id === record.userId);
-  if (!employee) {
-    return { error: "Account is not linked to an employee record." };
+  if (record.lockedUntil && new Date(record.lockedUntil).getTime() > Date.now()) {
+    return { error: "This account is temporarily locked after too many failed attempts. Try again shortly." };
   }
-  if (employee.status === "inactive") {
+
+  const valid = await verifyPassword(password, record.passwordHash);
+
+  if (!valid) {
+    const attempts = record.failedAttempts + 1;
+    await db
+      .update(userCredentials)
+      .set({
+        failedAttempts: attempts,
+        lockedUntil:
+          attempts >= MAX_FAILED_ATTEMPTS
+            ? new Date(Date.now() + LOCKOUT_MS).toISOString()
+            : record.lockedUntil,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(userCredentials.employeeId, record.id));
+    return { error: GENERIC_FAILURE };
+  }
+
+  if (record.status === "inactive") {
     return { error: "This account has been deactivated. Contact your administrator." };
   }
 
-  return { user: toAuthUser(employee) };
+  // Successful sign-in clears the failure counter and any active lockout.
+  await db
+    .update(userCredentials)
+    .set({ failedAttempts: 0, lockedUntil: null, updatedAt: new Date().toISOString() })
+    .where(eq(userCredentials.employeeId, record.id));
+
+  return {
+    user: {
+      id: record.id,
+      username: record.username,
+      name: record.fullName,
+      email: record.email,
+      role: record.role,
+    },
+  };
 }
 
 export async function login(identifier: string, password: string): Promise<LoginResult> {
-  const { user, error } = await authenticateCredentials(identifier, password);
+  let result: Awaited<ReturnType<typeof authenticateCredentials>>;
+  try {
+    result = await authenticateCredentials(identifier, password);
+  } catch (error) {
+    console.error("[auth] sign-in failed:", error);
+    return { success: false, error: describeDbError(error) };
+  }
+
+  const { user, error } = result;
   if (!user) return { success: false, error };
 
-  const session = createSession(user.id);
+  const session = await createSession(user.id);
   const cookieStore = await cookies();
   cookieStore.set({
     name: SESSION_COOKIE_NAME,
@@ -60,7 +131,7 @@ export async function login(identifier: string, password: string): Promise<Login
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
-    maxAge: Math.floor((session.expiresAt - Date.now()) / 1000),
+    maxAge: Math.max(1, Math.floor((session.expiresAt - Date.now()) / 1000)),
   });
 
   return { success: true, user };
@@ -69,24 +140,46 @@ export async function login(identifier: string, password: string): Promise<Login
 export async function logout(): Promise<void> {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
-  destroySession(token);
+  await destroySession(token);
   cookieStore.delete(SESSION_COOKIE_NAME);
 }
 
 /**
- * Reads the current user from the session cookie. Memoised per request so
- * repeated calls in a single render pass hit the session store once.
+ * Reads the current user from the session cookie, then re-reads the employee
+ * row. The role is always the current database value, so a role change takes
+ * effect on the next request instead of at the next sign-in.
+ *
+ * Memoised per request so repeated calls in one render pass hit the database once.
  */
 export const getCurrentUser = cache(async (): Promise<AuthUser | null> => {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
-  const session = getSession(token);
+  const session = await getSession(token);
   if (!session) return null;
 
-  const employee = db.employees.find((e) => e.id === session.userId);
-  if (!employee || employee.status === "inactive") return null;
+  const rows = await db
+    .select({
+      id: employees.id,
+      username: employees.username,
+      fullName: employees.fullName,
+      email: employees.email,
+      role: employees.role,
+      status: employees.status,
+    })
+    .from(employees)
+    .where(eq(employees.id, session.userId))
+    .limit(1);
 
-  return toAuthUser(employee);
+  const row = rows[0];
+  if (!row || row.status === "inactive") return null;
+
+  return {
+    id: row.id,
+    username: row.username,
+    name: row.fullName,
+    email: row.email,
+    role: row.role,
+  };
 });
 
 export async function getUserRole(): Promise<Role | null> {
@@ -116,3 +209,5 @@ export async function requireRole(role: Role): Promise<AuthUser> {
 export async function dashboardPathFor(role: Role): Promise<string> {
   return ROLE_HOME[role];
 }
+
+export { destroyAllSessionsForUser };

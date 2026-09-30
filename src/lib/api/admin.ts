@@ -5,12 +5,13 @@ import { getTodaysAttendanceStats, getDepartmentAttendanceBreakdown } from "./at
 import { getPendingLeaveCount, getRecentLeaves } from "./leaves";
 import { getPayrollTotals } from "./salary";
 import { getGlobalTaskCounts, getRecentTasks } from "./tasks";
-import { getRecentAnnouncements } from "./announcements";
+import { getRecentAnnouncementsWithRead } from "./announcements";
 import { currentMonth } from "@/lib/format";
 
 export async function getAdminDashboardData() {
   await requireRole("admin");
 
+  const user = await requireRole("admin");
   const month = currentMonth();
   const [staff, todayStats, departments, pendingLeaves, recentLeaves, payroll, taskCounts, recentTasks, announcements] =
     await Promise.all([
@@ -22,7 +23,9 @@ export async function getAdminDashboardData() {
       getPayrollTotals(month),
       getGlobalTaskCounts(),
       getRecentTasks(5),
-      getRecentAnnouncements(4),
+      // Read state is per person, so it is resolved for the signed-in admin
+      // rather than hardcoded to "read" in the view.
+      getRecentAnnouncementsWithRead(user.id, 4),
     ]);
 
   return {

@@ -1,66 +1,101 @@
 import "server-only";
-import { db, nextId } from "@/lib/db/store";
+
+import { and, asc, count, desc, eq, ilike, sql } from "drizzle-orm";
+import { db } from "@/lib/db/client";
+import { taskAssigner, taskAssignee, taskSelection } from "@/lib/db/selects";
+import { likePattern } from "@/lib/db/query-helpers";
+import { employees, tasks } from "@/lib/db/schema";
+import { toTask } from "@/lib/db/mappers";
 import { requireActionRole } from "@/lib/auth/actions";
-import { simulateLatency } from "./latency";
 import { today } from "@/lib/format";
 import type { Task, TaskFilters, TaskPriority, TaskStatus } from "@/types/task";
 
-const PRIORITY_ORDER: Record<TaskPriority, number> = { urgent: 4, high: 3, medium: 2, low: 1 };
+/**
+ * The status a task *reads* as, as opposed to the status it is *stored* as.
+ *
+ * A past-due task that has not been completed is shown as overdue. This is
+ * computed in SQL rather than in JavaScript so that filtering by "overdue"
+ * and counting overdue tasks use exactly the same rule as the list view.
+ */
+const effectiveStatus = sql<TaskStatus>`case
+  when ${tasks.status} <> 'completed' and ${tasks.dueDate} < current_date then 'overdue'
+  else ${tasks.status}
+end`;
 
-const byNewest = (a: Task, b: Task) => (a.createdAt < b.createdAt ? 1 : -1);
+const searchBlob = sql`concat_ws(' ', ${tasks.title}, ${tasks.description}, ${taskAssignee.fullName}, ${taskAssigner.fullName})`;
 
-/** Derives the effective status so past-due open tasks always read as overdue. */
-export function withEffectiveStatus(task: Task): Task {
-  if (task.status === "completed" || task.status === "overdue") return task;
-  return task.dueDate < today() ? { ...task, status: "overdue" } : task;
+/** Orders by urgency rather than alphabetically, so "urgent" sorts first. */
+function priorityRank() {
+  return sql<number>`case ${tasks.priority}
+    when 'urgent' then 4
+    when 'high' then 3
+    when 'medium' then 2
+    else 1
+  end`;
 }
 
-function applyFilters(tasks: Task[], filters: TaskFilters): Task[] {
-  let result = tasks;
+function buildFilters(filters: TaskFilters, extra?: ReturnType<typeof and>) {
+  const conditions = [extra];
 
   if (filters.query) {
-    const q = filters.query.toLowerCase();
-    result = result.filter((t) =>
-      [t.title, t.description, t.assignedToName, t.assignedByName].join(" ").toLowerCase().includes(q),
-    );
+    conditions.push(ilike(searchBlob, likePattern(filters.query)));
   }
   if (filters.status && filters.status !== "all") {
-    result = result.filter((t) => t.status === filters.status);
+    conditions.push(sql`${effectiveStatus} = ${filters.status}`);
   }
   if (filters.priority && filters.priority !== "all") {
-    result = result.filter((t) => t.priority === filters.priority);
+    conditions.push(eq(tasks.priority, filters.priority));
   }
 
-  const key = filters.sort ?? "dueDate";
-  const direction = filters.order === "desc" ? -1 : 1;
-  result.sort((a, b) => {
-    if (key === "priority") return (PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]) * direction;
-    if (key === "title") return a.title.localeCompare(b.title) * direction;
-    if (key === "createdAt") return (a.createdAt < b.createdAt ? -1 : 1) * direction;
-    return (a.dueDate < b.dueDate ? -1 : 1) * direction;
-  });
+  return and(...conditions.filter(Boolean));
+}
 
-  return result;
+function orderFor(sort: TaskFilters["sort"], order: "asc" | "desc" | undefined) {
+  const direction = order === "desc" ? desc : asc;
+  if (sort === "priority") return [direction(priorityRank()), asc(tasks.dueDate)];
+  if (sort === "title") return [direction(tasks.title)];
+  if (sort === "createdAt") return [direction(tasks.createdAt)];
+  return [direction(tasks.dueDate)];
 }
 
 export async function listTasksForEmployee(
   employeeId: string,
   filters: TaskFilters = {},
 ): Promise<Task[]> {
-  await simulateLatency(150);
-  const own = db.tasks.filter((t) => t.assignedToId === employeeId).map(withEffectiveStatus);
-  return applyFilters(own, filters);
+  const rows = await db
+    .select(taskSelection)
+    .from(tasks)
+    .innerJoin(taskAssignee, eq(tasks.assignedToId, taskAssignee.id))
+    .leftJoin(taskAssigner, eq(tasks.assignedById, taskAssigner.id))
+    .where(buildFilters(filters, eq(tasks.assignedToId, employeeId)))
+    .orderBy(...orderFor(filters.sort, filters.order));
+
+  return rows.map(toTask);
 }
 
 export async function listAllTasks(filters: TaskFilters = {}): Promise<Task[]> {
-  await simulateLatency(180);
-  return applyFilters(db.tasks.map(withEffectiveStatus), filters);
+  const rows = await db
+    .select(taskSelection)
+    .from(tasks)
+    .innerJoin(taskAssignee, eq(tasks.assignedToId, taskAssignee.id))
+    .leftJoin(taskAssigner, eq(tasks.assignedById, taskAssigner.id))
+    .where(buildFilters(filters))
+    .orderBy(...orderFor(filters.sort, filters.order));
+
+  return rows.map(toTask);
 }
 
 export async function getTaskById(id: string): Promise<Task | null> {
-  await simulateLatency(80);
-  const task = db.tasks.find((t) => t.id === id);
-  return task ? withEffectiveStatus(task) : null;
+  const rows = await db
+    .select(taskSelection)
+    .from(tasks)
+    .innerJoin(taskAssignee, eq(tasks.assignedToId, taskAssignee.id))
+    .leftJoin(taskAssigner, eq(tasks.assignedById, taskAssigner.id))
+    .where(eq(tasks.id, id))
+    .limit(1);
+
+  const row = rows[0];
+  return row ? toTask(row) : null;
 }
 
 export interface TaskCounts {
@@ -71,43 +106,72 @@ export interface TaskCounts {
   overdue: number;
 }
 
-export async function getTaskCountsForEmployee(employeeId: string): Promise<TaskCounts> {
-  await simulateLatency(100);
-  const own = db.tasks.filter((t) => t.assignedToId === employeeId).map(withEffectiveStatus);
+function countsFromRow(row: {
+  total: number;
+  pending: number;
+  inProgress: number;
+  completed: number;
+  overdue: number;
+}): TaskCounts {
   return {
-    total: own.length,
-    pending: own.filter((t) => t.status === "pending").length,
-    inProgress: own.filter((t) => t.status === "in_progress").length,
-    completed: own.filter((t) => t.status === "completed").length,
-    overdue: own.filter((t) => t.status === "overdue").length,
+    total: row.total,
+    pending: row.pending,
+    inProgress: row.inProgress,
+    completed: row.completed,
+    overdue: row.overdue,
   };
+}
+
+function countSelection() {
+  return {
+    total: count(),
+    pending: sql<number>`count(*) filter (where ${effectiveStatus} = 'pending')`,
+    inProgress: sql<number>`count(*) filter (where ${effectiveStatus} = 'in_progress')`,
+    completed: sql<number>`count(*) filter (where ${effectiveStatus} = 'completed')`,
+    overdue: sql<number>`count(*) filter (where ${effectiveStatus} = 'overdue')`,
+  };
+}
+
+export async function getTaskCountsForEmployee(employeeId: string): Promise<TaskCounts> {
+  const rows = await db
+    .select(countSelection())
+    .from(tasks)
+    .where(eq(tasks.assignedToId, employeeId));
+
+  return countsFromRow(rows[0] ?? { total: 0, pending: 0, inProgress: 0, completed: 0, overdue: 0 });
 }
 
 export async function getGlobalTaskCounts(): Promise<TaskCounts> {
-  await simulateLatency(120);
-  const all = db.tasks.map(withEffectiveStatus);
-  return {
-    total: all.length,
-    pending: all.filter((t) => t.status === "pending").length,
-    inProgress: all.filter((t) => t.status === "in_progress").length,
-    completed: all.filter((t) => t.status === "completed").length,
-    overdue: all.filter((t) => t.status === "overdue").length,
-  };
+  const rows = await db.select(countSelection()).from(tasks);
+
+  return countsFromRow(rows[0] ?? { total: 0, pending: 0, inProgress: 0, completed: 0, overdue: 0 });
 }
 
 export async function getRecentTasksForEmployee(employeeId: string, limit = 5): Promise<Task[]> {
-  await simulateLatency(120);
-  return db.tasks
-    .filter((t) => t.assignedToId === employeeId)
-    .map(withEffectiveStatus)
-    .sort(byNewest)
-    .slice(0, limit);
+  const rows = await db
+    .select(taskSelection)
+    .from(tasks)
+    .innerJoin(taskAssignee, eq(tasks.assignedToId, taskAssignee.id))
+    .leftJoin(taskAssigner, eq(tasks.assignedById, taskAssigner.id))
+    .where(eq(tasks.assignedToId, employeeId))
+    .orderBy(desc(tasks.createdAt))
+    .limit(limit);
+
+  return rows.map(toTask);
 }
 
 export async function getRecentTasks(limit = 5): Promise<Task[]> {
-  await simulateLatency(120);
-  return db.tasks.map(withEffectiveStatus).sort(byNewest).slice(0, limit);
+  const rows = await db
+    .select(taskSelection)
+    .from(tasks)
+    .innerJoin(taskAssignee, eq(tasks.assignedToId, taskAssignee.id))
+    .leftJoin(taskAssigner, eq(tasks.assignedById, taskAssigner.id))
+    .orderBy(desc(tasks.createdAt))
+    .limit(limit);
+
+  return rows.map(toTask);
 }
+
 export interface CreateTaskInput {
   assignedToIds: string[];
   title: string;
@@ -119,47 +183,71 @@ export interface CreateTaskInput {
 
 export async function createTasks(input: CreateTaskInput, assignedById: string): Promise<number> {
   const actor = await requireActionRole("admin");
-  await simulateLatency(360);
 
   const assigneeIds = input.assignedToIds.length > 0 ? input.assignedToIds : [actor.id];
-  const created: Task[] = [];
 
-  for (const employeeId of assigneeIds) {
-    const employee = db.employees.find((e) => e.id === employeeId);
-    if (!employee) continue;
+  // Resolve the assignees up front so an unknown id fails loudly instead of
+  // silently creating fewer tasks than the admin asked for.
+  const assignees = await db
+    .select({ id: employees.id })
+    .from(employees)
+    .where(sql`${employees.id} in ${assigneeIds}`);
 
-    created.push({
-      id: nextId("tsk"),
-      title: input.title.trim(),
-      description: input.description.trim(),
-      assignedToId: employee.id,
-      assignedToName: employee.fullName,
-      assignedById: assignedById || actor.id,
-      assignedByName: actor.name,
-      createdAt: new Date().toISOString(),
-      startDate: input.startDate,
-      dueDate: input.dueDate,
-      priority: input.priority,
-      status: input.startDate > today() ? "pending" : "in_progress",
-    });
+  if (assignees.length === 0) {
+    throw new Error("None of the selected staff members could be found.");
   }
 
-  db.tasks.push(...created);
+  const status: TaskStatus = input.startDate > today() ? "pending" : "in_progress";
+
+  const created = await db
+    .insert(tasks)
+    .values(
+      assignees.map((assignee) => ({
+        title: input.title.trim(),
+        description: input.description.trim(),
+        assignedToId: assignee.id,
+        assignedById: assignedById || actor.id,
+        startDate: input.startDate,
+        dueDate: input.dueDate,
+        priority: input.priority,
+        status,
+      })),
+    )
+    .returning({ id: tasks.id });
+
   return created.length;
 }
 
-export async function updateTaskStatus(taskId: string, status: TaskStatus, actingUserId: string, isAdmin: boolean): Promise<Task | null> {
-  if (!isAdmin) await requireActionRole("employee", "admin");
-  else await requireActionRole("admin");
-  await simulateLatency(220);
+export async function updateTaskStatus(
+  taskId: string,
+  status: TaskStatus,
+  actingUserId: string,
+  isAdmin: boolean,
+): Promise<Task | null> {
+  if (isAdmin) await requireActionRole("admin");
+  else await requireActionRole("employee", "admin");
 
-  const task = db.tasks.find((t) => t.id === taskId);
+  const existing = await db
+    .select({ id: tasks.id, assignedToId: tasks.assignedToId })
+    .from(tasks)
+    .where(eq(tasks.id, taskId))
+    .limit(1);
+
+  const task = existing[0];
   if (!task) return null;
+  // An employee may only move their own tasks.
   if (!isAdmin && task.assignedToId !== actingUserId) return null;
 
-  task.status = status;
-  task.completedAt = status === "completed" ? new Date().toISOString() : undefined;
-  return withEffectiveStatus(task);
+  await db
+    .update(tasks)
+    .set({
+      status,
+      completedAt: status === "completed" ? new Date().toISOString() : null,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(tasks.id, taskId));
+
+  return getTaskById(taskId);
 }
 
 export async function updateTaskFromAdmin(
@@ -167,35 +255,37 @@ export async function updateTaskFromAdmin(
   input: Partial<Pick<Task, "title" | "description" | "priority" | "dueDate" | "status" | "assignedToId">>,
 ): Promise<Task | null> {
   await requireActionRole("admin");
-  await simulateLatency(280);
 
-  const task = db.tasks.find((t) => t.id === taskId);
-  if (!task) return null;
+  const existing = await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, taskId)).limit(1);
+  if (existing.length === 0) return null;
 
-  if (input.assignedToId) {
-    const employee = db.employees.find((e) => e.id === input.assignedToId);
-    if (employee) {
-      task.assignedToId = employee.id;
-      task.assignedToName = employee.fullName;
+  const patch: Partial<typeof tasks.$inferInsert> = { updatedAt: new Date().toISOString() };
+
+  if (input.title !== undefined) patch.title = input.title.trim();
+  if (input.description !== undefined) patch.description = input.description.trim();
+  if (input.priority !== undefined) patch.priority = input.priority;
+  if (input.dueDate !== undefined) patch.dueDate = input.dueDate;
+  if (input.assignedToId !== undefined) patch.assignedToId = input.assignedToId;
+  if (input.status !== undefined) {
+    patch.status = input.status;
+    patch.completedAt = input.status === "completed" ? new Date().toISOString() : null;
+  }
+
+  try {
+    await db.update(tasks).set(patch).where(eq(tasks.id, taskId));
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code: string }).code === "23503") {
+      throw new Error("That staff member could not be found.");
     }
-  }
-  if (input.title) task.title = input.title.trim();
-  if (input.description !== undefined) task.description = input.description.trim();
-  if (input.priority) task.priority = input.priority;
-  if (input.dueDate) task.dueDate = input.dueDate;
-  if (input.status) {
-    task.status = input.status;
-    task.completedAt = input.status === "completed" ? new Date().toISOString() : undefined;
+    throw error;
   }
 
-  return withEffectiveStatus(task);
+  return getTaskById(taskId);
 }
 
 export async function deleteTask(taskId: string): Promise<boolean> {
   await requireActionRole("admin");
-  await simulateLatency(240);
-  const index = db.tasks.findIndex((t) => t.id === taskId);
-  if (index === -1) return false;
-  db.tasks.splice(index, 1);
-  return true;
+
+  const deleted = await db.delete(tasks).where(eq(tasks.id, taskId)).returning({ id: tasks.id });
+  return deleted.length > 0;
 }

@@ -23,14 +23,20 @@ import {
   deleteStaffAction,
 } from "@/app/admin/actions";
 import { editStaffSchema, type EditStaffInput } from "@/lib/validations/employee";
-import { DEPARTMENTS, POSITIONS } from "@/lib/constants";
+import { POSITIONS } from "@/lib/constants";
 import { formatCurrency, formatDate } from "@/lib/format";
 import { MoreHorizontal, Pencil, UserCheck, UserX, Trash2 } from "lucide-react";
 import type { Employee } from "@/types/employee";
 
 const PAGE_SIZE = 8;
 
-export function StaffTable({ employees }: { employees: Employee[] }) {
+interface StaffTableProps {
+  employees: Employee[];
+  /** Every department from the `departments` table, including ones with no staff yet. */
+  departments: string[];
+}
+
+export function StaffTable({ employees, departments }: StaffTableProps) {
   const router = useRouter();
   const { toast } = useToast();
   const [pending, startTransition] = useTransition();
@@ -41,11 +47,6 @@ export function StaffTable({ employees }: { employees: Employee[] }) {
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<Employee | null>(null);
   const [confirm, setConfirm] = useState<Employee | null>(null);
-
-  const departments = useMemo(
-    () => Array.from(new Set(employees.map((e) => e.department))).sort(),
-    [employees],
-  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -244,7 +245,11 @@ export function StaffTable({ employees }: { employees: Employee[] }) {
         </div>
       )}
 
-      <EditStaffModal employee={editing} onClose={() => setEditing(null)} />
+      <EditStaffModal
+        employee={editing}
+        departments={departments}
+        onClose={() => setEditing(null)}
+      />
       <ConfirmDialog
         open={confirm !== null}
         onClose={() => setConfirm(null)}
@@ -274,7 +279,15 @@ export function StaffTable({ employees }: { employees: Employee[] }) {
   );
 }
 
-function EditStaffModal({ employee, onClose }: { employee: Employee | null; onClose: () => void }) {
+function EditStaffModal({
+  employee,
+  departments,
+  onClose,
+}: {
+  employee: Employee | null;
+  departments: string[];
+  onClose: () => void;
+}) {
   const router = useRouter();
   const { toast } = useToast();
   const [serverError, setServerError] = useState<string | undefined>();
@@ -295,7 +308,7 @@ function EditStaffModal({ employee, onClose }: { employee: Employee | null; onCl
       email: "",
       phone: "",
       address: "",
-      department: "Engineering",
+      department: "",
       position: "Software Engineer",
       joiningDate: "",
       basicSalary: 0,
@@ -312,7 +325,7 @@ function EditStaffModal({ employee, onClose }: { employee: Employee | null; onCl
       email: employee.email,
       phone: employee.phone,
       address: employee.address,
-      department: employee.department as EditStaffInput["department"],
+      department: employee.department,
       position: employee.position as EditStaffInput["position"],
       joiningDate: employee.joiningDate,
       basicSalary: employee.basicSalary,
@@ -379,7 +392,7 @@ function EditStaffModal({ employee, onClose }: { employee: Employee | null; onCl
           <FormField label="Department" htmlFor="edit-department" error={errors.department?.message} required>
             <Select
               id="edit-department"
-              options={DEPARTMENTS.map((d) => ({ value: d, label: d }))}
+              options={departments.map((d) => ({ value: d, label: d }))}
               error={errors.department?.message}
               {...register("department")}
             />

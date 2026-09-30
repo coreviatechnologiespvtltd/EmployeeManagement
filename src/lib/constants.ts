@@ -3,17 +3,9 @@ export const APP_SYSTEM_NAME = "Employee Management System";
 export const SESSION_COOKIE_NAME = "corevia_session";
 export const SESSION_TTL_MS = 1000 * 60 * 60 * 8;
 
-export const DEPARTMENTS = [
-  "Engineering",
-  "Human Resources",
-  "Finance",
-  "Sales",
-  "Marketing",
-  "Customer Support",
-  "Operations",
-  "Quality Assurance",
-] as const;
-
+// Departments are database records, not a constant — see the `departments`
+// table and `listDepartments()` in `lib/api/employees`. Positions stay here
+// because they are job titles rather than managed rows.
 export const POSITIONS = [
   "Software Engineer",
   "Senior Software Engineer",
@@ -76,6 +68,10 @@ export const PAYMENT_STATUSES = [
   { value: "processing", label: "Processing" },
 ] as const;
 
+// Company policy lives in the `company_settings` table so it can be changed with
+// an UPDATE instead of a redeploy. These values are the fallback used when the
+// settings rows are missing — read them through `getCompanyPolicy()` in
+// `lib/api/settings`, never directly.
 export const LEAVE_ALLOCATION_DAYS = 18;
 export const WORKDAY_START = "09:00";
 export const LATE_THRESHOLD_MINUTES = 15;

@@ -24,7 +24,11 @@ export default async function AdminDashboardPage() {
   const { staff, todayStats, departments, pendingLeaves, recentLeaves, payroll, taskCounts, recentTasks, announcements } =
     data;
 
-  const attendanceTotal = todayStats.total || 1;
+  // With nobody recorded today there is no rate to report, so the cards fall back
+// to "no records" rather than dividing by an invented denominator.
+const attendanceTotal = todayStats.total;
+const attendanceRate =
+  attendanceTotal > 0 ? Math.round(((todayStats.present + todayStats.late) / attendanceTotal) * 100) : null;
   const attendanceChart = [
     { label: "Present", value: todayStats.present, color: "var(--color-success-500)" },
     { label: "Late", value: todayStats.late, color: "var(--color-warning-500)" },
@@ -67,8 +71,16 @@ export default async function AdminDashboardPage() {
         />
         <DashboardCard
           label="Present Today"
-          value={`${todayStats.present}/${attendanceTotal}`}
-          sublabel={`${Math.round((todayStats.present / attendanceTotal) * 100)}% attendance rate`}
+          value={
+            attendanceTotal > 0
+              ? `${todayStats.present}/${attendanceTotal}`
+              : `${todayStats.present}/0`
+          }
+          sublabel={
+            attendanceRate === null
+              ? "No attendance recorded today"
+              : `${attendanceRate}% attendance rate`
+          }
           icon={CalendarCheck2}
           tone="success"
           href="/admin/attendance"
@@ -284,7 +296,7 @@ export default async function AdminDashboardPage() {
                   publishedAt: notice.publishedAt,
                   authorName: notice.authorName,
                   priority: notice.priority,
-                  isRead: true,
+                  isRead: notice.isRead,
                 }}
               />
             ))}
