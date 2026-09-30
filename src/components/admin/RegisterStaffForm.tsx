@@ -15,7 +15,7 @@ import { FormActions, FormErrorMessage, SubmitButton } from "@/components/forms/
 import { SectionCard } from "@/components/ui/Card";
 import { registerStaffAction } from "@/app/admin/actions";
 import { registerStaffSchema, type RegisterStaffInput } from "@/lib/validations/employee";
-import { DEPARTMENTS, POSITIONS, COMPANY_EMAIL_DOMAIN } from "@/lib/constants";
+import { POSITIONS, COMPANY_EMAIL_DOMAIN } from "@/lib/constants";
 import { today } from "@/lib/format";
 
 const ROLE_OPTIONS = [
@@ -23,7 +23,12 @@ const ROLE_OPTIONS = [
   { value: "admin", label: "Administrator" },
 ];
 
-export function RegisterStaffForm() {
+interface RegisterStaffFormProps {
+  /** Read from the `departments` table by the server component that renders this. */
+  departments: string[];
+}
+
+export function RegisterStaffForm({ departments }: RegisterStaffFormProps) {
   const router = useRouter();
   const { toast } = useToast();
   const [serverError, setServerError] = useState<string | undefined>();
@@ -47,7 +52,9 @@ export function RegisterStaffForm() {
       email: "",
       phone: "",
       address: "",
-      department: "Engineering",
+      // Prefilled from the database, with a fallback for the case where no
+      // department has been created yet.
+      department: departments[0] ?? "",
       position: "Software Engineer",
       joiningDate: today(),
       basicSalary: 0,
@@ -125,7 +132,7 @@ export function RegisterStaffForm() {
           <FormField label="Department" htmlFor="department" error={errors.department?.message} required>
             <Select
               id="department"
-              options={DEPARTMENTS.map((d) => ({ value: d, label: d }))}
+              options={departments.map((d) => ({ value: d, label: d }))}
               error={errors.department?.message}
               {...register("department")}
             />

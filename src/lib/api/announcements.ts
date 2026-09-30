@@ -1,7 +1,13 @@
 import "server-only";
-import { db, nextId } from "@/lib/db/store";
+
+import { and, asc, count, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
+import { revalidatePath } from "next/cache";
+import { db } from "@/lib/db/client";
+import { announcementAuthor, announcementSelection } from "@/lib/db/selects";
+import { likePattern } from "@/lib/db/query-helpers";
+import { announcementReads, announcements } from "@/lib/db/schema";
+import { toAnnouncement } from "@/lib/db/mappers";
 import { requireActionRole } from "@/lib/auth/actions";
-import { simulateLatency } from "./latency";
 import { today } from "@/lib/format";
 import type { AuthUser } from "@/types/auth";
 import type {
@@ -10,7 +16,6 @@ import type {
   AnnouncementStatus,
   NoticeSummary,
 } from "@/types/announcement";
-import { revalidatePath } from "next/cache";
 
 export interface AnnouncementFilters {
   query?: string;
@@ -20,95 +25,192 @@ export interface AnnouncementFilters {
   order?: "asc" | "desc";
 }
 
-const PRIORITY_ORDER: Record<AnnouncementPriority, number> = { urgent: 4, high: 3, normal: 2, low: 1 };
+const searchBlob = sql`concat_ws(' ', ${announcements.title}, ${announcements.description}, ${announcements.body})`;
 
-function isVisible(announcement: Announcement): boolean {
-  if (announcement.status !== "published") return false;
-  if (announcement.expiresAt && announcement.expiresAt.slice(0, 10) < today()) return false;
-  return true;
-}
+/**
+ * A notice reaches an employee only while it is published and not expired.
+ * Expiry is compared on the calendar date, not the timestamp, so a notice that
+ * expires at 00:00 today still shows for the rest of the day — which is what
+ * the previous `expiresAt.slice(0, 10) < today()` comparison did.
+ */
+const visibleToEmployees = and(
+  eq(announcements.status, "published"),
+  or(
+    isNull(announcements.expiresAt),
+    sql`${announcements.expiresAt}::date >= ${today()}`,
+  ),
+);
 
-function applyFilters(list: Announcement[], filters: AnnouncementFilters): Announcement[] {
-  let result = [...list];
+const hasRead = (employeeId: string) => sql<boolean>`exists (
+  select 1 from ${announcementReads}
+  where ${announcementReads.announcementId} = ${announcements.id}
+    and ${announcementReads.employeeId} = ${employeeId}
+)`;
 
-  if (filters.query) {
-    const q = filters.query.toLowerCase();
-    result = result.filter((a) =>
-      [a.title, a.description, a.body, a.authorName].join(" ").toLowerCase().includes(q),
-    );
-  }
-  if (filters.status && filters.status !== "all") {
-    result = result.filter((a) => a.status === filters.status);
-  }
-  if (filters.priority && filters.priority !== "all") {
-    result = result.filter((a) => a.priority === filters.priority);
-  }
-
-  const key = filters.sort ?? "publishedAt";
-  const direction = filters.order === "desc" ? -1 : 1;
-  result.sort((a, b) => {
-    if (key === "priority") return (PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]) * direction;
-    if (key === "title") return a.title.localeCompare(b.title) * direction;
-    return (a.publishedAt < b.publishedAt ? -1 : 1) * direction;
-  });
-
-  return result;
+function priorityRank() {
+  return sql<number>`case ${announcements.priority}
+    when 'urgent' then 4
+    when 'high' then 3
+    when 'normal' then 2
+    else 1
+  end`;
 }
 
 export async function listNoticesForEmployee(employeeId: string): Promise<NoticeSummary[]> {
-  await simulateLatency(180);
-  return db.announcements
-    .filter(isVisible)
-    .sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : -1))
-    .map((a) => ({
-      id: a.id,
-      title: a.title,
-      description: a.description,
-      publishedAt: a.publishedAt,
-      authorName: a.authorName,
-      priority: a.priority,
-      isRead: a.readBy.includes(employeeId),
-    }));
+  const rows = await db
+    .select({
+      id: announcements.id,
+      title: announcements.title,
+      description: announcements.description,
+      publishedAt: announcements.publishedAt,
+      authorName: sql<string>`coalesce(${announcementAuthor.fullName}, 'Unknown')`.as("author_name"),
+      priority: announcements.priority,
+      isRead: hasRead(employeeId),
+    })
+    .from(announcements)
+    .leftJoin(announcementAuthor, eq(announcements.authorId, announcementAuthor.id))
+    .where(visibleToEmployees)
+    .orderBy(desc(announcements.publishedAt));
+
+  return rows;
 }
 
 export async function getNoticeForEmployee(id: string, employeeId: string) {
-  await simulateLatency(120);
-  const announcement = db.announcements.find((a) => a.id === id);
-  if (!announcement || !isVisible(announcement)) return null;
-  return { announcement, isRead: announcement.readBy.includes(employeeId) };
+  const rows = await db
+    .select({
+      ...announcementSelection,
+      isRead: hasRead(employeeId),
+    })
+    .from(announcements)
+    .leftJoin(announcementAuthor, eq(announcements.authorId, announcementAuthor.id))
+    .where(and(eq(announcements.id, id), visibleToEmployees))
+    .limit(1);
+
+  const row = rows[0];
+  if (!row) return null;
+
+  return { announcement: toAnnouncement(row), isRead: row.isRead };
 }
 
+/**
+ * Counted in SQL with a `NOT EXISTS` anti-join rather than by loading every
+ * notice and testing `readBy` in JavaScript.
+ */
 export async function getUnreadNoticeCount(employeeId: string): Promise<number> {
-  await simulateLatency(70);
-  return db.announcements.filter((a) => isVisible(a) && !a.readBy.includes(employeeId)).length;
+  const rows = await db
+    .select({ total: count() })
+    .from(announcements)
+    .where(
+      and(
+        visibleToEmployees,
+        sql`not exists (
+          select 1 from ${announcementReads}
+          where ${announcementReads.announcementId} = ${announcements.id}
+            and ${announcementReads.employeeId} = ${employeeId}
+        )`,
+      ),
+    );
+
+  return rows[0]?.total ?? 0;
 }
 
 export async function markNoticeRead(id: string, employeeId: string): Promise<boolean> {
   await requireActionRole("employee", "admin");
-  const announcement = db.announcements.find((a) => a.id === id);
-  if (!announcement) return false;
-  if (!announcement.readBy.includes(employeeId)) {
-    announcement.readBy.push(employeeId);
-  }
+
+  const existing = await db
+    .select({ id: announcements.id })
+    .from(announcements)
+    .where(eq(announcements.id, id))
+    .limit(1);
+
+  if (existing.length === 0) return false;
+
+  // The composite primary key makes a repeat read a no-op rather than a duplicate.
+  await db
+    .insert(announcementReads)
+    .values({ announcementId: id, employeeId })
+    .onConflictDoNothing();
+
   return true;
 }
 
+function buildFilters(filters: AnnouncementFilters) {
+  const conditions = [];
+
+  if (filters.query) {
+    conditions.push(ilike(searchBlob, likePattern(filters.query)));
+  }
+  if (filters.status && filters.status !== "all") {
+    conditions.push(eq(announcements.status, filters.status));
+  }
+  if (filters.priority && filters.priority !== "all") {
+    conditions.push(eq(announcements.priority, filters.priority));
+  }
+
+  return conditions.length > 0 ? and(...conditions) : undefined;
+}
+
+function orderFor(sort: AnnouncementFilters["sort"], order: "asc" | "desc" | undefined) {
+  // The admin list has always sorted oldest-first by default.
+  const direction = order === "desc" ? desc : asc;
+  if (sort === "priority") return [direction(priorityRank()), desc(announcements.publishedAt)];
+  if (sort === "title") return [direction(announcements.title)];
+  return [direction(announcements.publishedAt)];
+}
+
 export async function listAllAnnouncements(filters: AnnouncementFilters = {}): Promise<Announcement[]> {
-  await simulateLatency(200);
-  return applyFilters(db.announcements, filters);
+  const rows = await db
+    .select(announcementSelection)
+    .from(announcements)
+    .leftJoin(announcementAuthor, eq(announcements.authorId, announcementAuthor.id))
+    .where(buildFilters(filters))
+    .orderBy(...orderFor(filters.sort, filters.order));
+
+  return rows.map(toAnnouncement);
 }
 
 export async function getAnnouncementById(id: string): Promise<Announcement | null> {
-  await simulateLatency(80);
-  return db.announcements.find((a) => a.id === id) ?? null;
+  const rows = await db
+    .select(announcementSelection)
+    .from(announcements)
+    .leftJoin(announcementAuthor, eq(announcements.authorId, announcementAuthor.id))
+    .where(eq(announcements.id, id))
+    .limit(1);
+
+  const row = rows[0];
+  return row ? toAnnouncement(row) : null;
 }
 
 export async function getRecentAnnouncements(limit = 4): Promise<Announcement[]> {
-  await simulateLatency(130);
-  return db.announcements
-    .filter(isVisible)
-    .sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : -1))
-    .slice(0, limit);
+  const rows = await db
+    .select(announcementSelection)
+    .from(announcements)
+    .leftJoin(announcementAuthor, eq(announcements.authorId, announcementAuthor.id))
+    .where(visibleToEmployees)
+    .orderBy(desc(announcements.publishedAt))
+    .limit(limit);
+
+  return rows.map(toAnnouncement);
+}
+
+/**
+ * Recent announcements annotated with whether a specific person has read each
+ * one. The admin dashboard shows real read state rather than assuming every
+ * notice has been seen.
+ */
+export async function getRecentAnnouncementsWithRead(
+  employeeId: string,
+  limit = 4,
+): Promise<Array<Announcement & { isRead: boolean }>> {
+  const rows = await db
+    .select({ ...announcementSelection, isRead: hasRead(employeeId) })
+    .from(announcements)
+    .leftJoin(announcementAuthor, eq(announcements.authorId, announcementAuthor.id))
+    .where(visibleToEmployees)
+    .orderBy(desc(announcements.publishedAt))
+    .limit(limit);
+
+  return rows.map((row) => ({ ...toAnnouncement(row), isRead: row.isRead }));
 }
 
 export interface AnnouncementInput {
@@ -121,29 +223,40 @@ export interface AnnouncementInput {
   expiresAt: string | null;
 }
 
-export async function createAnnouncement(input: AnnouncementInput, actor: AuthUser): Promise<Announcement> {
+/** Normalises a form datetime into an absolute instant before it is stored. */
+function toInstant(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+export async function createAnnouncement(
+  input: AnnouncementInput,
+  actor: AuthUser,
+): Promise<Announcement> {
   await requireActionRole("admin");
-  await simulateLatency(340);
 
-  const announcement: Announcement = {
-    id: nextId("ann"),
-    title: input.title.trim(),
-    description: input.description.trim(),
-    body: input.body.trim(),
-    authorId: actor.id,
-    authorName: actor.name,
-    priority: input.priority,
-    status: input.status,
-    publishedAt: new Date(input.publishedAt).toISOString(),
-    expiresAt: input.expiresAt ? new Date(input.expiresAt).toISOString() : null,
-    readBy: [],
-  };
+  const inserted = await db
+    .insert(announcements)
+    .values({
+      title: input.title.trim(),
+      description: input.description.trim(),
+      body: input.body.trim(),
+      authorId: actor.id,
+      priority: input.priority,
+      status: input.status,
+      publishedAt: toInstant(input.publishedAt) ?? new Date().toISOString(),
+      expiresAt: toInstant(input.expiresAt),
+    })
+    .returning({ id: announcements.id });
 
-  db.announcements.unshift(announcement);
   revalidatePath("/admin/announcements");
   revalidatePath("/admin/dashboard");
   revalidatePath("/employee/notices");
-  return announcement;
+
+  const created = await getAnnouncementById(inserted[0]!.id);
+  if (!created) throw new Error("The announcement could not be read back after creation.");
+  return created;
 }
 
 export async function updateAnnouncement(
@@ -151,24 +264,28 @@ export async function updateAnnouncement(
   input: AnnouncementInput,
 ): Promise<Announcement | null> {
   await requireActionRole("admin");
-  await simulateLatency(340);
 
-  const announcement = db.announcements.find((a) => a.id === id);
-  if (!announcement) return null;
+  const updated = await db
+    .update(announcements)
+    .set({
+      title: input.title.trim(),
+      description: input.description.trim(),
+      body: input.body.trim(),
+      priority: input.priority,
+      status: input.status,
+      publishedAt: toInstant(input.publishedAt) ?? new Date().toISOString(),
+      expiresAt: toInstant(input.expiresAt),
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(announcements.id, id))
+    .returning({ id: announcements.id });
 
-  Object.assign(announcement, {
-    title: input.title.trim(),
-    description: input.description.trim(),
-    body: input.body.trim(),
-    priority: input.priority,
-    status: input.status,
-    publishedAt: new Date(input.publishedAt).toISOString(),
-    expiresAt: input.expiresAt ? new Date(input.expiresAt).toISOString() : null,
-  });
+  if (updated.length === 0) return null;
 
   revalidatePath("/admin/announcements");
   revalidatePath("/employee/notices");
-  return announcement;
+
+  return getAnnouncementById(id);
 }
 
 export async function setAnnouncementStatus(
@@ -176,21 +293,32 @@ export async function setAnnouncementStatus(
   status: AnnouncementStatus,
 ): Promise<Announcement | null> {
   await requireActionRole("admin");
-  await simulateLatency(240);
-  const announcement = db.announcements.find((a) => a.id === id);
-  if (!announcement) return null;
-  announcement.status = status;
+
+  const updated = await db
+    .update(announcements)
+    .set({ status, updatedAt: new Date().toISOString() })
+    .where(eq(announcements.id, id))
+    .returning({ id: announcements.id });
+
+  if (updated.length === 0) return null;
+
   revalidatePath("/admin/announcements");
   revalidatePath("/employee/notices");
-  return announcement;
+
+  return getAnnouncementById(id);
 }
 
+/** Read receipts cascade with the announcement, so nothing is left dangling. */
 export async function deleteAnnouncement(id: string): Promise<boolean> {
   await requireActionRole("admin");
-  await simulateLatency(280);
-  const index = db.announcements.findIndex((a) => a.id === id);
-  if (index === -1) return false;
-  db.announcements.splice(index, 1);
+
+  const deleted = await db
+    .delete(announcements)
+    .where(eq(announcements.id, id))
+    .returning({ id: announcements.id });
+
+  if (deleted.length === 0) return false;
+
   revalidatePath("/admin/announcements");
   revalidatePath("/admin/dashboard");
   revalidatePath("/employee/notices");

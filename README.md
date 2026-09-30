@@ -3,7 +3,7 @@
 Internal employee management system for **Corevia Technologies**, built with Next.js
 App Router, TypeScript and Tailwind CSS. It ships two role-based portals — an
 **Employee Portal** for self-service and an **Admin Console** for HR operations —
-behind a mock, backend-ready data layer.
+on top of a real **PostgreSQL** database accessed through **Drizzle ORM**.
 
 ---
 
@@ -12,6 +12,7 @@ behind a mock, backend-ready data layer.
 - [Features](#features)
 - [Tech stack](#tech-stack)
 - [Getting started](#getting-started)
+- [Database setup](#database-setup)
 - [Demo credentials](#demo-credentials)
 - [Scripts](#scripts)
 - [Routes](#routes)
@@ -19,10 +20,11 @@ behind a mock, backend-ready data layer.
 - [Architecture](#architecture)
   - [Auth & authorization](#auth--authorization)
   - [Data layer](#data-layer)
+  - [Migrations](#migrations)
   - [Server Actions](#server-actions)
   - [UI system](#ui-system)
 - [Design system](#design-system)
-- [Replacing the mock backend](#replacing-the-mock-backend)
+- [Database schema](#database-schema)
 - [Verification status](#verification-status)
 - [Notes and limitations](#notes-and-limitations)
 
@@ -80,7 +82,10 @@ behind a mock, backend-ready data layer.
 | Validation | Zod 4 |
 | Charts | Hand-rolled SVG (no charting dependency) |
 | Lint | ESLint 9 flat config (`eslint-config-next`) |
-| Data | In-memory mock store with seeded records |
+| Database | PostgreSQL 14+ (local instance or Supabase) |
+| ORM | Drizzle ORM 0.45 with the `pg` driver |
+| Passwords | `bcryptjs`, cost factor 12 |
+| Migrations | Hand-authored SQL applied by a small runner |
 
 No UI, chart or table kit is used — every component in the app is hand-built.
 
@@ -88,10 +93,13 @@ No UI, chart or table kit is used — every component in the app is hand-built.
 
 ## Getting started
 
-**Requirements:** Node.js 20+ and npm.
+**Requirements:** Node.js 20+, npm, and a PostgreSQL database.
 
 ```bash
 npm install
+cp .env.example .env     # then fill in DATABASE_URL
+npm run db:migrate       # create the schema
+npm run db:seed          # load the demo dataset
 npm run dev
 ```
 
@@ -110,19 +118,74 @@ npm run start
 
 ---
 
+## Database setup
+
+One variable is required, and it never leaves the server:
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | yes | PostgreSQL connection string, read server-side only |
+
+`.env` is gitignored (`.env*` with `!.env.example`). `DATABASE_URL` is read by
+exactly two places — `src/lib/db/client.ts` and the scripts in `scripts/`. No
+page, component, server action or client bundle references it, so the
+credentials are not shipped to the browser.
+
+### Local PostgreSQL
+
+```env
+DATABASE_URL=postgres://postgres:your-password@localhost:5432/employee_Corevia
+```
+
+The database itself can be created with plain `psql`:
+
+```sql
+CREATE DATABASE employee_Corevia;
+```
+
+### Supabase
+
+Supabase *is* PostgreSQL, so the same migrations run unchanged. Copy the
+connection string from **Project Settings → Database**, and note two things:
+
+- The password must be URL-encoded (`@` becomes `%40`).
+- The `db.<ref>.supabase.co` host is IPv6-only in several regions. On an
+  IPv4-only network use the **session pooler** instead, e.g.
+  `postgres://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require`
+
+Switching between a local instance and Supabase is a one-line change to `.env` —
+no code changes, because nothing outside the data layer knows where the database
+lives.
+
+---
+
 ## Demo credentials
+
+`npm run db:seed` creates the accounts and **prints every username and password at
+the end of the run**. The two to start with:
 
 | Role | Username | Password | Lands on |
 | --- | --- | --- | --- |
 | Admin | `admin` | `Admin@123` | `/admin/dashboard` |
 | Employee | `employee` | `Employee@123` | `/employee/dashboard` |
 
-The login form accepts either the username or the registered email address. The
-same demo values are shown on the sign-in screen.
+The login form accepts either the username or the registered email address.
 
-Additional seeded staff accounts (password `Employee@123`) exist so admin
-features such as task assignment and leave approval have realistic data to act
-on; see `src/lib/db/seed/`.
+These credentials are **not** compiled into the application. The seed script
+hashes them with bcrypt before insert, and the sign-in page deliberately shows no
+hint card, so the values exist only in your database and in this README.
+
+Override them without editing the script:
+
+```bash
+SEED_ADMIN_PASSWORD=... SEED_EMPLOYEE_PASSWORD=... npm run db:seed
+```
+
+Every other active account (`bikash.thapa`, `nisha.gurung`, …) also has a
+credential row and shares the employee password, so you can sign in as different
+people to confirm each sees only their own attendance, payslips, tasks and leave.
+One account is seeded `inactive` and has no credential row at all, which is how a
+deactivated employee behaves.
 
 ---
 
@@ -135,6 +198,10 @@ on; see `src/lib/db/seed/`.
 | `npm run start` | Serve the production build |
 | `npm run lint` | ESLint (flat config) |
 | `npm run typecheck` | `tsc --noEmit` |
+| `npm run db:migrate` | Apply pending files from `supabase/migrations/` |
+| `npm run db:seed` | Truncate and reload the demo dataset |
+| `npm run db:studio` | Open Drizzle Studio to browse the data |
+| `npm run db:check` | Validate migration consistency |
 
 ---
 
@@ -191,7 +258,7 @@ src/
 │   └── globals.css
 ├── components/
 │   ├── admin/            # Admin data tables, forms and modals
-│   ├── auth/             # Login form, demo credential hint
+│   ├── auth/             # Login form
 │   ├── charts/           # BarChart, LineChart, DonutChart
 │   ├── employee/         # Employee cards, tables, forms
 │   ├── forms/            # FormField, FormActions, SubmitButton
@@ -199,8 +266,8 @@ src/
 │   └── ui/               # 20 reusable primitives
 ├── lib/
 │   ├── api/              # Service layer (the backend boundary)
-│   ├── auth/             # Session store, service, actions
-│   ├── db/               # Mock store + seed data
+│   ├── auth/             # bcrypt hashing, DB session store, guards
+│   ├── db/               # Drizzle schema, pool, shared selects, mappers
 │   ├── validations/      # Zod schemas
 │   ├── constants.ts
 │   ├── navigation.ts
@@ -209,6 +276,10 @@ src/
 │   └── chart-format.ts
 ├── types/                # Shared domain types
 └── proxy.ts              # Coarse auth middleware
+
+supabase/migrations/     # Versioned SQL migrations
+scripts/                 # migrate.mjs, seed.mjs
+drizzle.config.ts        # drizzle-kit config (studio, check)
 ```
 
 ---
@@ -233,23 +304,63 @@ Authentication is intentionally split into two layers:
    re-checks the caller's role before touching the data layer, so authorisation
    holds even if an action is invoked directly.
 
-Sessions are held in an in-memory map keyed by a 256-bit random token, stored in
-a `corevia_session` httpOnly cookie with an 8-hour TTL. The cookie is marked
-`Secure` in production and `SameSite=Lax` always.
+Sessions live in the `sessions` table. A 256-bit random token is generated with
+`node:crypto`, stored in a `corevia_session` httpOnly cookie with an 8-hour TTL,
+and only its **SHA-256 digest** is written to the database — so a dump of the
+`sessions` table cannot be replayed as a live login. The cookie is marked `Secure`
+in production and `SameSite=Lax` always.
+
+Authentication is answered entirely by PostgreSQL: the account is found by
+username *or* email, case-insensitively; the password is checked with `bcrypt`
+against `user_credentials.password_hash`; the role that gates every page and
+action is read from `employees.role`; and the session is a row. There is no
+hardcoded account and no plaintext comparison anywhere. Five consecutive failures
+lock the account for 15 minutes, and every failure returns the same message so
+the form cannot be used to probe which usernames exist. Deactivating an employee
+destroys their live sessions immediately.
 
 ### Data layer
 
-`src/lib/api/*` is the only place that touches data. Pages and components never
-import the store directly — they call these async functions, which simulate
-network latency so loading states are exercised realistically.
+`src/lib/api/*` is the only place that talks to the database. Pages and components
+never import Drizzle — they call these async functions, and every one of them
+imports `server-only`, which makes accidental client-side usage a build error.
 
 ```
-page.tsx  ──▶  lib/api/*.ts  ──▶  lib/db/store.ts  ──▶  seed data
+page.tsx  ──▶  lib/api/*.ts  ──▶  lib/db/client.ts  ──▶  PostgreSQL
+                                  lib/db/selects.ts   (shared projections)
 ```
 
 Each API module is scoped to a domain (`employees`, `tasks`, `attendance`,
-`salary`, `leaves`, `announcements`, `admin`, `dashboard`) and imports
-`server-only`, which makes accidental client-side usage a build error.
+`salary`, `leaves`, `announcements`, `admin`, `dashboard`, `settings`) and returns
+plain domain types. Shared join shapes live once in `lib/db/selects.ts` and row
+translation in `lib/db/mappers.ts`, so no query is written twice.
+
+Conventions worth knowing before editing a query:
+
+- **Filtering, searching, sorting and pagination happen in SQL**, not in the
+  component. Search uses `ILIKE` with an escaped pattern; sorting maps a UI key
+  to a column whitelist so it can never be interpolated from user input.
+- **`numeric` arrives as a string** from `pg`; every money column goes through
+  `toNumber()` in `lib/db/query-helpers.ts` before it reaches a component.
+- **`date` returns `YYYY-MM-DD` and `timestamptz` an ISO string**, which is what
+  the existing `formatDate` / `formatCurrency` helpers already expect.
+- **Derived state is derived in SQL.** A task's effective status, for example, is
+  computed with a `CASE` expression that promotes a non-completed, past-due task
+  to `overdue`, so the column on disk stays clean and a cron job is unnecessary.
+- **Writes are real transactions.** `createEmployee` inserts the row, rewrites the
+  unique `employee_code` to the id the sequence handed out, and inserts the
+  credential hash in one transaction, so a partial employee can never exist.
+
+### Migrations
+
+`supabase/migrations/*.sql` is the canonical DDL, applied in filename order by
+`scripts/migrate.mjs`, which records what it has run in a `schema_migrations`
+table. `drizzle.config.ts` points `drizzle-kit` at the same directory, so
+`npm run db:studio` and `npm run db:check` work against the same files.
+
+`src/lib/db/schema.ts` is the typed mirror of that DDL. After changing either,
+keep them in step: the schema file is what gives queries their types, and the SQL
+file is what actually runs.
 
 ### Server Actions
 
@@ -296,24 +407,70 @@ mapped to Tailwind 4 theme values in `src/app/globals.css` via `@theme inline`.
 
 ---
 
-## Replacing the mock backend
+## Database schema
 
-The mock layer is isolated so it can be replaced without touching the UI:
+The canonical DDL is `supabase/migrations/0001_init.sql`. It creates 12 tables,
+8 sequences, one `set_updated_at()` trigger function, and the constraints below.
 
-1. **Swap the store.** `src/lib/db/store.ts` is the only in-memory state. Point
-   the accessors at a database client (Prisma, Drizzle, SQL) and keep the same
-   function signatures.
-2. **Keep the API layer.** `src/lib/api/*.ts` functions already have the shape of
-   a service layer. Reimplement each body as a query and delete
-   `simulateLatency()`.
-3. **Replace the session store.** `src/lib/auth/session.ts` is four functions
-   (`createSession`, `getSession`, `destroySession`,
-   `destroyAllSessionsForUser`). Back them with a sessions table or an external
-   identity provider.
-4. **Remove the seed.** Delete `src/lib/db/seed/*` once real data exists.
+| Table | Purpose | Key columns |
+| --- | --- | --- |
+| `departments` | Departments, editable instead of hardcoded | `id` (`dept-N`), `name` **unique** |
+| `company_settings` | Company policy as key/value JSON | `key` PK, `value jsonb`, `label` |
+| `salary_component_templates` | Allowance/deduction presets for payroll | `id` (`sct-N`), `kind`, `amount`, unique `(kind, label)` |
+| `employees` | Staff directory and the source of roles | `id` (`emp-N`), `employee_code`, `username`, `email`, `role`, `status`, `basic_salary` |
+| `user_credentials` | One bcrypt hash per employee | `employee_id` PK/FK, `password_hash`, `failed_attempts`, `locked_until` |
+| `sessions` | Logged-in sessions, keyed by digest | `token_hash` PK, `employee_id`, `expires_at`, `last_seen_at` |
+| `tasks` | Assigned to-dos | `id` (`tsk-N`), `assigned_to_id`, `assigned_by_id`, `priority`, `status`, `due_date` |
+| `attendance_records` | Day register | `id` (`att-N`), `employee_id`, `work_date`, `status`, `working_hours`, unique `(employee_id, work_date)` |
+| `salary_records` | Monthly payslips | `id` (`sal-N`), `employee_id`, `month`, components, `net_salary`, `payment_status`, unique `(employee_id, month)` |
+| `leave_requests` | Applications and decisions | `id` (`lv-N`), `employee_id`, `leave_type`, `total_days`, `status`, `reviewed_by_id` |
+| `announcements` | Notices | `id` (`ann-N`), `author_id`, `priority`, `status`, `published_at`, `expires_at` |
+| `announcement_reads` | Per-employee read receipts | PK `(announcement_id, employee_id)` |
 
-Because pages only talk to `src/lib/api/*` and actions only talk to that layer
-plus `requireActionRole`, no component needs to change.
+Plus `schema_migrations`, written by the migration runner.
+
+### Relationships
+
+```
+departments ──1:N──▶ employees ──1:1──▶ user_credentials
+                          │
+                          ├──1:N──▶ sessions
+                          ├──1:N──▶ tasks          (assigned_to_id, ON DELETE CASCADE)
+                          ├──1:N──▶ attendance_records
+                          ├──1:N──▶ salary_records
+                          ├──1:N──▶ leave_requests
+                          ├──1:N──▶ announcement_reads
+                          ├──1:N──▶ announcements (author_id,     ON DELETE SET NULL)
+                          └──1:N──▶ tasks          (assigned_by_id, ON DELETE SET NULL)
+
+announcements ──1:N──▶ announcement_reads  (ON DELETE CASCADE)
+```
+
+Deleting an employee cascades to their sessions, tasks, attendance, payroll, leave
+and read receipts, so no orphan rows survive. Deleting a department is
+`RESTRICT` — a department with staff must be reassigned first.
+
+### Constraint decisions worth knowing
+
+- **Text primary keys from sequences.** `emp-1001`, `tsk-3001`, `lv-2001`,
+  `ann-4001` keep the identifiers the UI already exposed, while the value comes
+  from a per-table sequence so concurrent inserts cannot collide.
+- **Case-insensitive uniqueness** on `username` and `email` is expressed as
+  `CREATE UNIQUE INDEX ... (lower(col))`, because a `UNIQUE (lower(col))`
+  *constraint* is not valid syntax. Sign-in uses `lower(...)` too, so the rule
+  and the lookup agree.
+- **`UNIQUE (employee_id, work_date)`** makes an attendance correction an
+  `ON CONFLICT DO UPDATE` instead of a duplicate insert, and
+  **`UNIQUE (employee_id, month)`** does the same for payroll — one code path for
+  both "create" and "correct".
+- **`CHECK` constraints mirror the Zod enums**, so the domain rules hold even for
+  a write that bypasses the service layer.
+- **`overdue` is derived, not stored.** The column accepts it (the existing
+  controls offer it), but reads compute the effective status in SQL.
+- **`user_credentials` is a separate table**, so no ordinary employee query can
+  accidentally select a password hash.
+- **`updated_at` is maintained by a trigger**, not by the application, so it is
+  correct for any writer.
 
 ---
 
@@ -323,8 +480,10 @@ plus `requireActionRole`, no component needs to change.
 | --- | --- | --- |
 | Types | `npm run typecheck` | Passes |
 | Lint | `npm run lint` | 0 errors, 5 warnings |
-| Build | `npm run build` | Passes, 21 routes |
-| Runtime | `npm run start` + route walk | See below |
+| Build | `npm run build` | Passes, 21 routes, all `ƒ (Dynamic)` |
+| Migrations | `npm run db:migrate` | Applies cleanly on an empty database |
+| Seed | `npm run db:seed` | 8 departments, 11 employees, 18 tasks, 810 attendance, 120 salary, 8 leaves, 7 announcements |
+| Credentials in the client bundle | grep over `.next/static` | None |
 
 The 5 lint warnings are all `react-hooks/incompatible-library`, raised by React
 Compiler when `react-hook-form`'s `watch()` is used. They are advisory — React
@@ -337,31 +496,40 @@ switching `watch()` to `useWatch()` in:
 - `src/components/admin/SalaryFormModal.tsx`
 - `src/components/employee/LeaveRequestSection.tsx`
 
-Runtime verification performed against `npm run start`:
+Runtime verification was performed over HTTP against a live database:
 
 - Unauthenticated requests to `/`, `/employee/*` and `/admin/*` redirect to
   `/login`.
-- Login for both demo roles returns `303` and sets a valid session cookie.
-- All 16 authenticated pages return `200` and render seeded data.
-- Cross-role access redirects: employee → `/admin/*` and admin →
-  `/employee/*` both bounce to the correct portal.
-- `todo/[id]` and `notices/[id]` resolve for seeded records.
-- The server log is free of runtime errors across the full route walk.
-
-Server Action mutations were not exercised over raw HTTP (Next.js encrypts
-action IDs, so they cannot be invoked without a browser); they are covered by
-typecheck, lint and build.
+- Signing in through the real login form verifies the bcrypt hash, inserts a
+  session row and sets the cookie; both demo roles reach their portal.
+- All 19 authenticated pages return `200` and render rows read from PostgreSQL.
+- Cross-role access is refused: an employee reaching `/admin/*` and an admin
+  reaching `/employee/*` both land on `/unauthorized`.
+- 55 assertions against the service layer passed, covering employee create /
+  update / status / delete (including the `pending-<uuid>` → `EMP-N` code
+  rewrite), task create / edit / status with derived `overdue`, payroll upsert
+  (one row per month, net recalculated), attendance correction (upsert, hours
+  recomputed), leave submit / decide, announcement create / publish / draft
+  visibility / delete, read receipts, cascade behaviour, the last-active-admin
+  and self-delete guards, and employee-scoped access rules.
+- The database is the only source of state, so data and sessions survive a
+  server restart.
 
 ---
 
 ## Notes and limitations
 
-- **Data is in memory.** Mutations reset whenever the server restarts, and
-  sessions are lost on restart. This is expected for the mock backend.
-- **Single process.** The in-memory store is not safe across multiple server
-  instances; use a real database for horizontal scaling.
-- **No test suite** is included. The verification above is manual plus static
-  checks.
-- **Passwords** are compared against seeded plaintext credentials for
-  demonstration only. Use a hashing library such as `bcrypt` or `argon2` in the
-  real backend.
+- **Client-side filtering is still in place in seven components.** Search, sort
+  and pagination for the staff, task, attendance, leave, salary and announcement
+  tables are already implemented as SQL filters in the service layer, but the
+  tables additionally filter the rows they were handed in the browser. Pushing
+  the remaining filtering through the query string is the natural next step; it
+  was left alone here to keep the UI untouched.
+- **No automated test suite** is included. The verification above is a scripted
+  HTTP walk plus static checks; `npm run db:seed` is idempotent and safe to
+  re-run.
+- **The seed is destructive.** `db:seed` truncates the domain tables and reloads
+  the demo dataset. Point `DATABASE_URL` at a scratch database.
+- **Single database, no caching layer.** Every page is dynamic and reads live
+  data; there is no Redis or tag-based cache, so query volume scales with
+  traffic.

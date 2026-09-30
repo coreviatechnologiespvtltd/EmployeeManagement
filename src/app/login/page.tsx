@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth/service";
 import { ROLE_HOME } from "@/lib/navigation";
-import { LoginForm, DemoCredentialsHint } from "@/components/auth/LoginForm";
+import { LoginForm } from "@/components/auth/LoginForm";
 import { APP_NAME, APP_SYSTEM_NAME } from "@/lib/constants";
 
 export const metadata: Metadata = {
@@ -37,10 +37,6 @@ export default async function LoginPage() {
 
           <div className="mt-6">
             <LoginForm />
-          </div>
-
-          <div className="mt-6">
-            <DemoCredentialsHint />
           </div>
         </div>
 

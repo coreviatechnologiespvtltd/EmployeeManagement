@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { listEmployees, getStaffCountByStatus, listDepartmentsInUse } from "@/lib/api/employees";
+import { listEmployees, getStaffCountByStatus, listDepartments } from "@/lib/api/employees";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { DashboardCard } from "@/components/ui/DashboardCard";
 import { Button } from "@/components/ui/Button";
@@ -10,8 +10,11 @@ import { Users, UserCheck, UserX, UserPlus } from "lucide-react";
 export const metadata: Metadata = { title: "Manage Staff" };
 
 export default async function AdminStaffPage() {
-  const [employees, counts] = await Promise.all([listEmployees(), getStaffCountByStatus()]);
-  const departments = await listDepartmentsInUse();
+  const [employees, counts, departments] = await Promise.all([
+    listEmployees(),
+    getStaffCountByStatus(),
+    listDepartments(),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -41,7 +44,7 @@ export default async function AdminStaffPage() {
         />
       </div>
 
-      <StaffTable employees={employees} />
+      <StaffTable employees={employees} departments={departments} />
     </div>
   );
 }

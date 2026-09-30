@@ -1,9 +1,20 @@
 import "server-only";
-import { db, nextId } from "@/lib/db/store";
+
+import { and, asc, count, desc, eq, ilike, sql } from "drizzle-orm";
+import { db } from "@/lib/db/client";
+import { salarySelection } from "@/lib/db/selects";
+import { likePattern } from "@/lib/db/query-helpers";
+import { departments, employees, salaryComponentTemplates, salaryRecords } from "@/lib/db/schema";
+import { toMonthKey, toMonthStart, toNumber, toSalaryRecord } from "@/lib/db/mappers";
 import { requireActionRole } from "@/lib/auth/actions";
-import { simulateLatency } from "./latency";
 import { currentMonth, monthLabel } from "@/lib/format";
-import type { Allowance, Deduction, MonthlyEarnings, PaymentStatus, SalaryRecord } from "@/types/salary";
+import type {
+  Allowance,
+  Deduction,
+  MonthlyEarnings,
+  PaymentStatus,
+  SalaryRecord,
+} from "@/types/salary";
 
 export interface SalaryFilters {
   query?: string;
@@ -11,6 +22,8 @@ export interface SalaryFilters {
   department?: string;
   paymentStatus?: PaymentStatus | "all";
 }
+
+const searchBlob = sql`concat_ws(' ', ${employees.fullName}, ${employees.id}, ${departments.name})`;
 
 export function calculateNetSalary(input: {
   basicSalary: number;
@@ -27,91 +40,160 @@ export function calculateNetSalary(input: {
 }
 
 export async function listSalaryForEmployee(employeeId: string): Promise<SalaryRecord[]> {
-  await simulateLatency(180);
-  return db.salaries
-    .filter((s) => s.employeeId === employeeId)
-    .sort((a, b) => (a.month < b.month ? 1 : -1));
+  const rows = await db
+    .select(salarySelection)
+    .from(salaryRecords)
+    .innerJoin(employees, eq(salaryRecords.employeeId, employees.id))
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .where(eq(salaryRecords.employeeId, employeeId))
+    .orderBy(desc(salaryRecords.month));
+
+  return rows.map(toSalaryRecord);
 }
 
 export async function getSalaryForMonth(
   employeeId: string,
   month: string = currentMonth(),
 ): Promise<SalaryRecord | null> {
-  await simulateLatency(110);
-  return db.salaries.find((s) => s.employeeId === employeeId && s.month === month) ?? null;
+  const rows = await db
+    .select(salarySelection)
+    .from(salaryRecords)
+    .innerJoin(employees, eq(salaryRecords.employeeId, employees.id))
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .where(and(eq(salaryRecords.employeeId, employeeId), eq(salaryRecords.month, toMonthStart(month))))
+    .limit(1);
+
+  const row = rows[0];
+  return row ? toSalaryRecord(row) : null;
+}
+
+function buildFilters(filters: SalaryFilters) {
+  const conditions = [];
+
+  if (filters.query) {
+    conditions.push(ilike(searchBlob, likePattern(filters.query)));
+  }
+  if (filters.month && filters.month !== "all") {
+    conditions.push(eq(salaryRecords.month, toMonthStart(filters.month)));
+  }
+  if (filters.department && filters.department !== "all") {
+    conditions.push(eq(departments.name, filters.department));
+  }
+  if (filters.paymentStatus && filters.paymentStatus !== "all") {
+    conditions.push(eq(salaryRecords.paymentStatus, filters.paymentStatus));
+  }
+
+  return conditions.length > 0 ? and(...conditions) : undefined;
 }
 
 export async function listAllSalaries(filters: SalaryFilters = {}): Promise<SalaryRecord[]> {
-  await simulateLatency(220);
-  let result = [...db.salaries];
+  const rows = await db
+    .select(salarySelection)
+    .from(salaryRecords)
+    .innerJoin(employees, eq(salaryRecords.employeeId, employees.id))
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .where(buildFilters(filters))
+    .orderBy(asc(employees.fullName), desc(salaryRecords.month));
 
-  if (filters.query) {
-    const q = filters.query.toLowerCase();
-    result = result.filter((s) => [s.employeeName, s.employeeId, s.department].join(" ").toLowerCase().includes(q));
-  }
-  if (filters.month && filters.month !== "all") {
-    result = result.filter((s) => s.month === filters.month);
-  }
-  if (filters.department && filters.department !== "all") {
-    result = result.filter((s) => s.department === filters.department);
-  }
-  if (filters.paymentStatus && filters.paymentStatus !== "all") {
-    result = result.filter((s) => s.paymentStatus === filters.paymentStatus);
-  }
-
-  return result.sort((a, b) => a.employeeName.localeCompare(b.employeeName));
+  return rows.map(toSalaryRecord);
 }
 
 export async function getPayrollTotals(month: string = currentMonth()) {
-  const records = await listAllSalaries({ month });
+  const rows = await db
+    .select({
+      employees: count(),
+      gross: sql<string>`coalesce(sum(${salaryRecords.basicSalary} + ${salaryRecords.allowances} + ${salaryRecords.bonus}), 0)`,
+      deductions: sql<string>`coalesce(sum(${salaryRecords.deductions}), 0)`,
+      net: sql<string>`coalesce(sum(${salaryRecords.netSalary}), 0)`,
+      paid: sql<number>`count(*) filter (where ${salaryRecords.paymentStatus} = 'paid')`,
+    })
+    .from(salaryRecords)
+    .where(eq(salaryRecords.month, toMonthStart(month)));
+
+  const row = rows[0];
+  const employees_ = toNumber(row?.employees);
+
   return {
     month,
     monthLabel: monthLabel(month),
-    employees: records.length,
-    gross: records.reduce((sum, r) => sum + r.basicSalary + r.allowances + r.bonus, 0),
-    deductions: records.reduce((sum, r) => sum + r.deductions, 0),
-    net: records.reduce((sum, r) => sum + r.netSalary, 0),
-    paid: records.filter((r) => r.paymentStatus === "paid").length,
-    pending: records.filter((r) => r.paymentStatus !== "paid").length,
+    employees: employees_,
+    gross: toNumber(row?.gross),
+    deductions: toNumber(row?.deductions),
+    net: toNumber(row?.net),
+    paid: toNumber(row?.paid),
+    pending: employees_ - toNumber(row?.paid),
   };
 }
 
 export async function getAvailableMonths(): Promise<string[]> {
-  await simulateLatency(60);
-  return Array.from(new Set(db.salaries.map((s) => s.month))).sort().reverse();
+  const rows = await db
+    .selectDistinct({ month: salaryRecords.month })
+    .from(salaryRecords)
+    .orderBy(desc(salaryRecords.month));
+
+  return rows.map((row) => toMonthKey(row.month));
 }
 
 export async function getEarningsSummary(employeeId: string) {
   const records = await listSalaryForEmployee(employeeId);
-  const current = records.find((r) => r.month === currentMonth()) ?? null;
-  const previous = records.find((r) => r.month < currentMonth()) ?? null;
-  const total = records.reduce((sum, r) => sum + r.netSalary, 0);
-  const bonus = records.reduce((sum, r) => sum + r.bonus, 0);
+  const thisMonth = currentMonth();
 
-  return { total, current, previous, bonus, records };
+  const current = records.find((record) => record.month === thisMonth) ?? null;
+  const previous = records.find((record) => record.month < thisMonth) ?? null;
+
+  return {
+    total: records.reduce((sum, record) => sum + record.netSalary, 0),
+    current,
+    previous,
+    bonus: records.reduce((sum, record) => sum + record.bonus, 0),
+    records,
+  };
 }
 
+/** The last `months` months, zero-filled where an employee has no payslip. */
 export async function getEarningsSeries(employeeId: string, months: number): Promise<MonthlyEarnings[]> {
-  await simulateLatency(180);
   const now = new Date();
   const out: MonthlyEarnings[] = [];
 
+  const keys: string[] = [];
   for (let i = months - 1; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-    const record = db.salaries.find((s) => s.employeeId === employeeId && s.month === key);
+    keys.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  }
+
+  const start = toMonthStart(keys[0]!);
+
+  const rows = await db
+    .select({
+      month: salaryRecords.month,
+      basicSalary: salaryRecords.basicSalary,
+      allowances: salaryRecords.allowances,
+      bonus: salaryRecords.bonus,
+      deductions: salaryRecords.deductions,
+      netSalary: salaryRecords.netSalary,
+    })
+    .from(salaryRecords)
+    .where(and(eq(salaryRecords.employeeId, employeeId), sql`${salaryRecords.month} >= ${start}`))
+    .orderBy(asc(salaryRecords.month));
+
+  const byMonth = new Map(rows.map((row) => [toMonthKey(row.month), row]));
+
+  for (const key of keys) {
+    const d = new Date(`${key}-01T00:00:00`);
+    const record = byMonth.get(key);
     out.push({
       month: key,
       label: new Intl.DateTimeFormat("en-US", { month: "short" }).format(d),
-      basic: record?.basicSalary ?? 0,
-      allowances: record?.allowances ?? 0,
-      bonus: record?.bonus ?? 0,
+      basic: toNumber(record?.basicSalary),
+      allowances: toNumber(record?.allowances),
+      bonus: toNumber(record?.bonus),
       incentives: 0,
       other: 0,
-      deductions: record?.deductions ?? 0,
-      net: record?.netSalary ?? 0,
+      deductions: toNumber(record?.deductions),
+      net: toNumber(record?.netSalary),
     });
   }
+
   return out;
 }
 
@@ -128,70 +210,90 @@ export interface UpsertSalaryInput {
 
 export async function upsertSalary(input: UpsertSalaryInput): Promise<SalaryRecord | null> {
   await requireActionRole("admin");
-  await simulateLatency(360);
 
-  const employee = db.employees.find((e) => e.id === input.employeeId);
-  if (!employee) return null;
+  const employeeRows = await db
+    .select({ id: employees.id })
+    .from(employees)
+    .where(eq(employees.id, input.employeeId))
+    .limit(1);
 
-  const existing = db.salaries.find((s) => s.employeeId === input.employeeId && s.month === input.month);
+  if (employeeRows.length === 0) return null;
+
   const netSalary = calculateNetSalary(input);
+  const month = toMonthStart(input.month);
 
-  if (existing) {
-    Object.assign(existing, {
-      basicSalary: Number(input.basicSalary),
-      allowances: Number(input.allowances),
-      bonus: Number(input.bonus),
-      deductions: Number(input.deductions),
-      netSalary,
-      paymentStatus: input.paymentStatus,
-      remarks: input.remarks?.trim() || undefined,
-    });
-    return existing;
-  }
-
-  const record: SalaryRecord = {
-    id: nextId("sal"),
-    employeeId: employee.id,
-    employeeName: employee.fullName,
-    department: employee.department,
-    month: input.month,
-    basicSalary: Number(input.basicSalary),
-    allowances: Number(input.allowances),
-    bonus: Number(input.bonus),
-    deductions: Number(input.deductions),
-    netSalary,
+  const values = {
+    basicSalary: String(Number(input.basicSalary) || 0),
+    allowances: String(Number(input.allowances) || 0),
+    bonus: String(Number(input.bonus) || 0),
+    deductions: String(Number(input.deductions) || 0),
+    netSalary: String(netSalary),
     paymentStatus: input.paymentStatus,
-    remarks: input.remarks?.trim() || undefined,
+    remarks: input.remarks?.trim() || null,
+    updatedAt: new Date().toISOString(),
   };
 
-  db.salaries.push(record);
-  return record;
+  // `unique (employee_id, month)` turns this into a real upsert, so the same
+  // code path creates a payslip and corrects an existing one.
+  await db
+    .insert(salaryRecords)
+    .values({ ...values, employeeId: input.employeeId, month })
+    .onConflictDoUpdate({
+      target: [salaryRecords.employeeId, salaryRecords.month],
+      set: values,
+    });
+
+  return getSalaryForMonth(input.employeeId, input.month);
 }
 
 export async function markSalaryPaid(recordId: string): Promise<SalaryRecord | null> {
   await requireActionRole("admin");
-  await simulateLatency(260);
-  const record = db.salaries.find((s) => s.id === recordId);
-  if (!record) return null;
-  record.paymentStatus = "paid";
-  record.paidAt = new Date().toISOString();
-  return record;
+
+  const updated = await db
+    .update(salaryRecords)
+    .set({
+      paymentStatus: "paid",
+      paidAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(salaryRecords.id, recordId))
+    .returning({ id: salaryRecords.id, employeeId: salaryRecords.employeeId, month: salaryRecords.month });
+
+  const row = updated[0];
+  if (!row) return null;
+
+  return getSalaryForMonth(row.employeeId, toMonthKey(row.month));
 }
 
 export async function getSalaryHistoryForEmployee(employeeId: string): Promise<SalaryRecord[]> {
   return listSalaryForEmployee(employeeId);
 }
 
-export const ALLOWANCE_TEMPLATES: Allowance[] = [
-  { id: "a1", label: "Household Allowance", amount: 6000 },
-  { id: "a2", label: "Transport Allowance", amount: 2500 },
-  { id: "a3", label: "Medical Allowance", amount: 2000 },
-  { id: "a4", label: "Internet Allowance", amount: 1500 },
-];
+/**
+ * Allowance and deduction presets, previously two hardcoded arrays in this
+ * file. They now live in `salary_component_templates`.
+ */
+export async function listSalaryComponentTemplates(): Promise<{
+  allowances: Allowance[];
+  deductions: Deduction[];
+}> {
+  const rows = await db
+    .select({
+      id: salaryComponentTemplates.id,
+      kind: salaryComponentTemplates.kind,
+      label: salaryComponentTemplates.label,
+      amount: salaryComponentTemplates.amount,
+      sortOrder: salaryComponentTemplates.sortOrder,
+    })
+    .from(salaryComponentTemplates)
+    .orderBy(asc(salaryComponentTemplates.sortOrder), asc(salaryComponentTemplates.label));
 
-export const DEDUCTION_TEMPLATES: Deduction[] = [
-  { id: "d1", label: "Provident Fund (10%)", amount: 4000 },
-  { id: "d2", label: "TDS", amount: 1500 },
-  { id: "d3", label: "Absence Deduction", amount: 1200 },
-  { id: "d4", label: "Provident Library Fund", amount: 500 },
-];
+  return {
+    allowances: rows
+      .filter((row) => row.kind === "allowance")
+      .map((row) => ({ id: row.id, label: row.label, amount: toNumber(row.amount) })),
+    deductions: rows
+      .filter((row) => row.kind === "deduction")
+      .map((row) => ({ id: row.id, label: row.label, amount: toNumber(row.amount) })),
+  };
+}

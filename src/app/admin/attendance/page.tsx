@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { getAllAttendance } from "@/lib/api/attendance";
+import { getAllAttendance, getAttendanceDates } from "@/lib/api/attendance";
+import { getStandardShift } from "@/lib/api/settings";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { DashboardCard } from "@/components/ui/DashboardCard";
 import { AttendanceManagementTable } from "@/components/admin/AttendanceManagementTable";
@@ -17,11 +18,12 @@ export default async function AdminAttendancePage({
   const date = requestedDate ?? today();
 
   // The register needs every known date for the picker, but only one day of rows.
-  const [allRecords, records] = await Promise.all([
-    getAllAttendance(),
+  // The date list is a `select distinct` rather than a full-table fetch.
+  const [records, availableDates, shift] = await Promise.all([
     getAllAttendance({ date }),
+    getAttendanceDates(),
+    getStandardShift(),
   ]);
-  const availableDates = Array.from(new Set(allRecords.map((r) => r.date))).sort().reverse();
 
   const count = (status: string) => records.filter((r) => r.status === status).length;
   const total = records.length;
@@ -65,6 +67,8 @@ export default async function AdminAttendancePage({
           records={records}
           availableDates={availableDates.length > 0 ? availableDates : [date]}
           selectedDate={date}
+          defaultCheckIn={shift.checkIn}
+          defaultCheckOut={shift.checkOut}
         />
       )}
     </div>
