@@ -8,7 +8,6 @@ import { SectionCard } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { EmployeeAvatar } from "@/components/ui/EmployeeAvatar";
 import { TaskStatusControl } from "@/components/employee/TaskStatusControl";
-import { updateTaskStatusAction } from "@/app/employee/actions";
 import { TASK_PRIORITY_META, TASK_STATUS_META } from "@/lib/status";
 import { formatDate, formatRelative } from "@/lib/format";
 import { CalendarDays, User2, Flag, FileText, Clock } from "lucide-react";
@@ -62,12 +61,7 @@ export default async function TaskDetailPage({ params }: { params: Promise<{ id:
             </div>
 
             <div className="border-t border-ink-100 pt-4">
-              <TaskStatusControl
-                taskId={task.id}
-                currentStatus={task.status}
-                showLabel
-                onChange={(next) => updateTaskStatusAction(task.id, next)}
-              />
+              <TaskStatusControl taskId={task.id} currentStatus={task.status} showLabel />
             </div>
           </div>
         </SectionCard>

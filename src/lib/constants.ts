@@ -7,16 +7,16 @@ export const SESSION_TTL_MS = 1000 * 60 * 60 * 8;
 // table and `listDepartments()` in `lib/api/employees`. Positions stay here
 // because they are job titles rather than managed rows.
 export const POSITIONS = [
-  "Software Engineer",
+  "Jr Software Engineer",
   "Senior Software Engineer",
+  "Frontend Developer",
   "Team Lead",
   "QA Engineer",
   "HR Executive",
+  "Intern",
   "Accountant",
   "Sales Executive",
-  "Marketing Specialist",
-  "Support Agent",
-  "Operations Manager",
+  "Marketing",
 ] as const;
 
 export const LEAVE_TYPES = [
