@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { POSITIONS } from "@/lib/constants";
+import { strongPassword } from "@/lib/validations/auth";
 
 const roleSchema = z.enum(["employee", "admin"]);
 
@@ -34,12 +35,7 @@ export const registerStaffSchema = z
       .min(0, "Salary cannot be negative.")
       .max(10_000_000, "Salary looks too large."),
     role: roleSchema,
-    password: z
-      .string()
-      .min(8, "Password must be at least 8 characters.")
-      .regex(/[A-Z]/, "Include at least one uppercase letter.")
-      .regex(/[a-z]/, "Include at least one lowercase letter.")
-      .regex(/[0-9]/, "Include at least one number."),
+    password: strongPassword,
     confirmPassword: z.string().min(1, "Please confirm the password."),
   })
   .refine((data) => data.password === data.confirmPassword, {

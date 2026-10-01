@@ -2,9 +2,11 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { getCurrentUser, login as loginService, logout as logoutService } from "./service";
-import { loginSchema } from "@/lib/validations/auth";
+import { getCurrentUser, login as loginService, logout as logoutService, changeOwnPassword } from "./service";
+import { changePasswordSchema, loginSchema } from "@/lib/validations/auth";
+import { describeDbError } from "@/lib/db/client";
 import type { Role } from "@/types/auth";
+import type { ActionResult } from "@/types/common";
 
 export type LoginState = {
   error?: string;
@@ -38,6 +40,39 @@ export async function loginAction(
 export async function logoutAction(): Promise<void> {
   await logoutService();
   redirect("/login");
+}
+
+/**
+ * Self-service password change, available to both portals. The caller is the
+ * session owner — `requireActionRole` resolves the user from the cookie, so the
+ * target of the change can never be spoofed by the form.
+ */
+export async function changePasswordAction(input: unknown): Promise<ActionResult> {
+  const parsed = changePasswordSchema.safeParse(input);
+  if (!parsed.success) {
+    return {
+      success: false,
+      message: "Please correct the highlighted fields.",
+      fieldErrors: parsed.error.flatten().fieldErrors as Record<string, string[]>,
+    };
+  }
+
+  const user = await requireActionRole("employee", "admin");
+
+  try {
+    const result = await changeOwnPassword(
+      user.id,
+      parsed.data.currentPassword,
+      parsed.data.newPassword,
+    );
+    if (!result.success) {
+      return { success: false, message: result.error ?? "Unable to change your password." };
+    }
+    return { success: true, message: "Your password has been changed. Other devices have been signed out." };
+  } catch (error) {
+    console.error("[auth] password change failed:", error);
+    return { success: false, message: describeDbError(error) };
+  }
 }
 
 /**

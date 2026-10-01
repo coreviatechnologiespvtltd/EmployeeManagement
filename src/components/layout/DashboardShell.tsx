@@ -2,13 +2,14 @@
 
 import { useState, useTransition } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { PanelLeftClose, PanelLeftOpen, Menu, LogOut, User, Settings, CircleHelp } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen, Menu, LogOut, User, KeyRound, CircleHelp } from "lucide-react";
 import { logoutAction } from "@/lib/auth/actions";
 import { ROLE_LABEL } from "@/lib/navigation";
 import { Sheet } from "@/components/ui/Sheet";
 import { Button } from "@/components/ui/Button";
 import { DropdownMenu } from "@/components/ui/DropdownMenu";
 import { EmployeeAvatar } from "@/components/ui/EmployeeAvatar";
+import { ChangePasswordDialog } from "@/components/auth/ChangePasswordDialog";
 import { CoreviaBrand, SidebarNav, SidebarFooter } from "./sidebar-parts";
 import { cn } from "@/lib/cn";
 import type { AuthUser } from "@/types/auth";
@@ -27,6 +28,7 @@ export function DashboardShell({
   const router = useRouter();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
 
   // Close the mobile drawer on navigation by keying the sheet off the pathname,
@@ -134,7 +136,11 @@ export function DashboardShell({
             }
             items={[
               { label: user.name, icon: <User aria-hidden className="h-4 w-4" />, disabled: true },
-              { label: "My profile", icon: <Settings aria-hidden className="h-4 w-4" />, disabled: true },
+              {
+                label: "Change password",
+                icon: <KeyRound aria-hidden className="h-4 w-4" />,
+                onSelect: () => setChangePasswordOpen(true),
+              },
               { label: "Help & support", icon: <CircleHelp aria-hidden className="h-4 w-4" />, disabled: true },
               { label: "Logout", icon: <LogOut aria-hidden className="h-4 w-4" />, danger: true, onSelect: handleLogout },
             ]}
@@ -145,6 +151,9 @@ export function DashboardShell({
           <div className="mx-auto w-full max-w-[1400px]">{children}</div>
         </main>
       </div>
+
+      {/* One instance for both the desktop header menu and the mobile drawer. */}
+      <ChangePasswordDialog open={changePasswordOpen} onClose={() => setChangePasswordOpen(false)} />
     </div>
   );
 }

@@ -17,7 +17,8 @@ import {
 } from "@/lib/db/schema";
 import { toEmployee, toNumber } from "@/lib/db/mappers";
 import { hashPassword } from "@/lib/auth/password";
-import { destroyAllSessionsForUser } from "@/lib/auth/session";
+import { destroyAllSessionsForUser, destroyOtherSessionsForUser } from "@/lib/auth/session";
+import { getCurrentSessionToken } from "@/lib/auth/service";
 import { requireActionRole } from "@/lib/auth/actions";
 import type { AuthUser } from "@/types/auth";
 import type { Employee, EmployeeStatus } from "@/types/employee";
@@ -329,6 +330,50 @@ export async function createEmployee(input: CreateEmployeeInput): Promise<Employ
   const created = await getEmployeeById(employeeId);
   if (!created) throw new Error("The staff member could not be read back after creation.");
   return created;
+}
+
+/**
+ * Sets a new password on behalf of a staff member.
+ *
+ * The administrator chooses the value and passes it on out of band; there is no
+ * email delivery in this application, so this is the recovery path for anyone
+ * locked out of their account. Every session for the target is destroyed so a
+ * password handed over in chat cannot leave an old session alive, and the
+ * lockout counters are cleared so a locked account becomes usable again.
+ *
+ * An administrator resetting their *own* password keeps their current session,
+ * otherwise they would be signed out of the console by their own action.
+ */
+export async function resetPasswordByAdmin(id: string, newPassword: string): Promise<Employee> {
+  const actor = await requireActionRole("admin");
+
+  const target = await getEmployeeById(id);
+  if (!target) throw new Error("Staff member not found.");
+
+  // Hashed before the write, matching `createEmployee`.
+  const passwordHash = await hashPassword(newPassword);
+  const now = new Date().toISOString();
+
+  // An upsert rather than an update: a staff member registered without a
+  // credential row — the seeded inactive account does exactly this — can still
+  // be given their first password here.
+  await db
+    .insert(userCredentials)
+    .values({ employeeId: id, passwordHash, passwordUpdatedAt: now, failedAttempts: 0, lockedUntil: null, updatedAt: now })
+    .onConflictDoUpdate({
+      target: userCredentials.employeeId,
+      set: { passwordHash, passwordUpdatedAt: now, failedAttempts: 0, lockedUntil: null, updatedAt: now },
+    });
+
+  if (actor.id === id) {
+    await destroyOtherSessionsForUser(id, await getCurrentSessionToken());
+  } else {
+    await destroyAllSessionsForUser(id);
+  }
+
+  revalidatePath("/admin/staff");
+
+  return target;
 }
 
 export async function updateEmployee(id: string, input: UpdateEmployeeInput): Promise<Employee | null> {
