@@ -25,7 +25,8 @@ import {
 import { editStaffSchema, type EditStaffInput } from "@/lib/validations/employee";
 import { POSITIONS } from "@/lib/constants";
 import { formatCurrency, formatDate } from "@/lib/format";
-import { MoreHorizontal, Pencil, UserCheck, UserX, Trash2 } from "lucide-react";
+import { MoreHorizontal, Pencil, KeyRound, UserCheck, UserX, Trash2 } from "lucide-react";
+import { ResetPasswordModal } from "./ResetPasswordModal";
 import type { Employee } from "@/types/employee";
 
 const PAGE_SIZE = 8;
@@ -46,6 +47,7 @@ export function StaffTable({ employees, departments }: StaffTableProps) {
   const [status, setStatus] = useState<"all" | "active" | "inactive">("all");
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<Employee | null>(null);
+  const [resetting, setResetting] = useState<Employee | null>(null);
   const [confirm, setConfirm] = useState<Employee | null>(null);
 
   const filtered = useMemo(() => {
@@ -211,6 +213,11 @@ export function StaffTable({ employees, departments }: StaffTableProps) {
                               onSelect: () => setEditing(employee),
                             },
                             {
+                              label: "Reset password",
+                              icon: <KeyRound aria-hidden className="h-4 w-4" />,
+                              onSelect: () => setResetting(employee),
+                            },
+                            {
                               label: employee.status === "active" ? "Deactivate" : "Reactivate",
                               icon:
                                 employee.status === "active" ? (
@@ -250,6 +257,7 @@ export function StaffTable({ employees, departments }: StaffTableProps) {
         departments={departments}
         onClose={() => setEditing(null)}
       />
+      <ResetPasswordModal employee={resetting} onClose={() => setResetting(null)} />
       <ConfirmDialog
         open={confirm !== null}
         onClose={() => setConfirm(null)}

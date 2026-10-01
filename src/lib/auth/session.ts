@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, lt } from "drizzle-orm";
+import { and, eq, lt, ne } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { sessions } from "@/lib/db/schema";
 import { SESSION_TTL_MS } from "@/lib/constants";
@@ -91,6 +91,29 @@ export async function destroySession(token: string | undefined): Promise<void> {
  */
 export async function destroyAllSessionsForUser(userId: string): Promise<void> {
   await db.delete(sessions).where(eq(sessions.employeeId, userId));
+}
+
+/**
+ * Invalidates every session for a user *except* the one holding `keepToken`.
+ *
+ * Used when someone changes their own password: the session that performed the
+ * change stays alive so they are not bounced back to the login form, while any
+ * other device or browser they were signed in on is signed out. When `keepToken`
+ * is absent the condition is dropped and the call is equivalent to
+ * `destroyAllSessionsForUser`.
+ */
+export async function destroyOtherSessionsForUser(
+  userId: string,
+  keepToken: string | undefined,
+): Promise<void> {
+  await db
+    .delete(sessions)
+    .where(
+      and(
+        eq(sessions.employeeId, userId),
+        keepToken ? ne(sessions.tokenHash, hashToken(keepToken)) : undefined,
+      ),
+    );
 }
 
 /** Housekeeping helper, safe to call on boot or from a scheduled job. */

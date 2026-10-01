@@ -48,13 +48,15 @@ on top of a real **PostgreSQL** database accessed through **Drizzle ORM**.
   calculation.
 - **Notices** — announcement feed with read/unread state and notice detail
   pages.
+- **Change password** — self-service from the avatar menu, requiring the current
+  password; other devices are signed out on success.
 
 ### Admin console
 
 - **Dashboard** — headcount, attendance rate, pending leaves, payroll totals,
   department distribution and recent activity.
-- **Manage staff** — searchable, filterable staff table with edit, activate and
-  deactivate actions.
+- **Manage staff** — searchable, filterable staff table with edit, activate,
+  deactivate and password-reset actions.
 - **Register staff** — validated registration form with live password
   requirements.
 - **Announcements** — create, edit, publish/archive and delete announcements.
@@ -319,6 +321,32 @@ lock the account for 15 minutes, and every failure returns the same message so
 the form cannot be used to probe which usernames exist. Deactivating an employee
 destroys their live sessions immediately.
 
+**Changing and resetting passwords.** Anyone signed in can change their own from
+the avatar menu → *Change password*. The current password is required — holding a
+stolen session cookie is not enough to take an account over — and wrong attempts
+are counted against the same five-strike lockout budget as a failed sign-in, so
+the form cannot be used to guess it for free. Reusing the old password is
+rejected, because it would sign out every other device while changing nothing.
+
+An administrator resets someone else's password from *Manage Staff* → row menu →
+*Reset password*. There is no email delivery anywhere in this system, so the
+admin chooses the value and passes it on out of band; that dialog is also the
+recovery path for anyone locked out of their account.
+
+Both paths reuse the same bcrypt cost and the same `strongPassword` rule
+(`src/lib/validations/auth.ts`), which `registerStaffSchema` imports, so an
+admin-issued password and a self-chosen one cannot drift apart. On success the
+session that performed the change survives and every other session for that user
+is destroyed — so a password handed over in chat cannot leave an old session
+alive. An admin resetting their *own* password keeps their session too, instead
+of being signed out by their own action. An admin reset also clears
+`failed_attempts` and `locked_until`, because the point of it is usually to
+unstick a locked account.
+
+`resetPasswordByAdmin` writes with an upsert rather than an update: a staff
+member who was registered without a credential row — the seeded inactive account
+is exactly that case — can still be given a first password.
+
 ### Data layer
 
 `src/lib/api/*` is the only place that talks to the database. Pages and components
@@ -418,7 +446,7 @@ The canonical DDL is `supabase/migrations/0001_init.sql`. It creates 12 tables,
 | `company_settings` | Company policy as key/value JSON | `key` PK, `value jsonb`, `label` |
 | `salary_component_templates` | Allowance/deduction presets for payroll | `id` (`sct-N`), `kind`, `amount`, unique `(kind, label)` |
 | `employees` | Staff directory and the source of roles | `id` (`emp-N`), `employee_code`, `username`, `email`, `role`, `status`, `basic_salary` |
-| `user_credentials` | One bcrypt hash per employee | `employee_id` PK/FK, `password_hash`, `failed_attempts`, `locked_until` |
+| `user_credentials` | One bcrypt hash per employee | `employee_id` PK/FK, `password_hash`, `password_updated_at`, `failed_attempts`, `locked_until` |
 | `sessions` | Logged-in sessions, keyed by digest | `token_hash` PK, `employee_id`, `expires_at`, `last_seen_at` |
 | `tasks` | Assigned to-dos | `id` (`tsk-N`), `assigned_to_id`, `assigned_by_id`, `priority`, `status`, `due_date` |
 | `attendance_records` | Day register | `id` (`att-N`), `employee_id`, `work_date`, `status`, `working_hours`, unique `(employee_id, work_date)` |

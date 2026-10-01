@@ -8,8 +8,14 @@ import { db, describeDbError } from "@/lib/db/client";
 import { employees, userCredentials } from "@/lib/db/schema";
 import { SESSION_COOKIE_NAME } from "@/lib/constants";
 import { ROLE_HOME } from "@/lib/navigation";
-import { verifyPassword } from "./password";
-import { createSession, destroyAllSessionsForUser, destroySession, getSession } from "./session";
+import { verifyPassword, hashPassword } from "./password";
+import {
+  createSession,
+  destroyAllSessionsForUser,
+  destroyOtherSessionsForUser,
+  destroySession,
+  getSession,
+} from "./session";
 import type { AuthUser, LoginResult, Role } from "@/types/auth";
 
 /**
@@ -142,6 +148,91 @@ export async function logout(): Promise<void> {
   const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
   await destroySession(token);
   cookieStore.delete(SESSION_COOKIE_NAME);
+}
+
+/**
+ * The raw token from the request cookie.
+ *
+ * Only the password flows need this, and only so they can keep the caller's own
+ * session alive while invalidating the user's others. Never log or return it.
+ */
+export async function getCurrentSessionToken(): Promise<string | undefined> {
+  const cookieStore = await cookies();
+  return cookieStore.get(SESSION_COOKIE_NAME)?.value;
+}
+
+/**
+ * Self-service password change.
+ *
+ * Requires the current password, so possession of a stolen session cookie alone
+ * is not enough to take the account over. On success every other session for
+ * this user is destroyed and the failure counters are cleared; the session that
+ * performed the change keeps working.
+ */
+export async function changeOwnPassword(
+  userId: string,
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ success: boolean; error?: string }> {
+  const rows = await db
+    .select({ passwordHash: userCredentials.passwordHash, failedAttempts: userCredentials.failedAttempts, lockedUntil: userCredentials.lockedUntil })
+    .from(userCredentials)
+    .where(eq(userCredentials.employeeId, userId))
+    .limit(1);
+
+  const record = rows[0];
+  if (!record) {
+    return { success: false, error: "This account has no password set. Ask an administrator to issue one." };
+  }
+
+  if (record.lockedUntil && new Date(record.lockedUntil).getTime() > Date.now()) {
+    return { success: false, error: "This account is temporarily locked after too many failed attempts. Try again shortly." };
+  }
+
+  const valid = await verifyPassword(currentPassword, record.passwordHash);
+
+  if (!valid) {
+    // Counted against the same lockout budget as a failed sign-in, so the
+    // change form cannot be used to guess the current password for free.
+    const attempts = record.failedAttempts + 1;
+    await db
+      .update(userCredentials)
+      .set({
+        failedAttempts: attempts,
+        lockedUntil:
+          attempts >= MAX_FAILED_ATTEMPTS
+            ? new Date(Date.now() + LOCKOUT_MS).toISOString()
+            : record.lockedUntil,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(userCredentials.employeeId, userId));
+    return { success: false, error: "Your current password is incorrect." };
+  }
+
+  // Reusing the old value would silently invalidate every other session while
+  // changing nothing, which reads as a bug to the person who just did it.
+  if (await verifyPassword(newPassword, record.passwordHash)) {
+    return { success: false, error: "Your new password must be different from your current password." };
+  }
+
+  // Hashed before the write, for the same reason as `createEmployee`: bcrypt at
+  // cost 12 is slow and should not be holding a pooled connection open.
+  const passwordHash = await hashPassword(newPassword);
+
+  await db
+    .update(userCredentials)
+    .set({
+      passwordHash,
+      passwordUpdatedAt: new Date().toISOString(),
+      failedAttempts: 0,
+      lockedUntil: null,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(userCredentials.employeeId, userId));
+
+  await destroyOtherSessionsForUser(userId, await getCurrentSessionToken());
+
+  return { success: true };
 }
 
 /**

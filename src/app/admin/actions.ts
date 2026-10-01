@@ -7,6 +7,7 @@ import {
   updateEmployee,
   setEmployeeStatus,
   deleteEmployee,
+  resetPasswordByAdmin,
 } from "@/lib/api/employees";
 import { createTasks, updateTaskFromAdmin, deleteTask } from "@/lib/api/tasks";
 import { decideLeave } from "@/lib/api/leaves";
@@ -19,6 +20,7 @@ import {
   deleteAnnouncement,
 } from "@/lib/api/announcements";
 import { registerStaffSchema, editStaffSchema } from "@/lib/validations/employee";
+import { resetPasswordSchema } from "@/lib/validations/auth";
 import { createTaskSchema, editTaskSchema } from "@/lib/validations/task";
 import { announcementSchema } from "@/lib/validations/announcement";
 import { salaryRecordSchema, attendanceCorrectionSchema } from "@/lib/validations/salary";
@@ -99,6 +101,30 @@ export async function deleteStaffAction(id: string): Promise<ActionResult> {
 
   revalidateAdmin();
   return { success: true, message: "Staff member removed." };
+}
+
+/** Administrator-issued password. No current password is required or accepted. */
+export async function resetStaffPasswordAction(id: string, input: unknown): Promise<ActionResult> {
+  const parsed = resetPasswordSchema.safeParse(input);
+  if (!parsed.success) {
+    return { success: false, message: "Please correct the highlighted fields.", fieldErrors: fieldErrors(parsed.error) };
+  }
+
+  await requireActionRole("admin");
+
+  try {
+    const employee = await resetPasswordByAdmin(id, parsed.data.newPassword);
+    revalidateAdmin();
+    return {
+      success: true,
+      message: `New password set for ${employee.fullName}. Share it with them directly.`,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : "Unable to reset the password.",
+    };
+  }
 }
 
 /* -------------------------------- Tasks -------------------------------- */

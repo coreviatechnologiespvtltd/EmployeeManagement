@@ -17,7 +17,7 @@ import {
  *
  * This file is the single source of truth for the query layer. The canonical
  * DDL lives in `supabase/migrations/`; the two are kept in sync by hand and
- * verified with `npm run db:verify`.
+ * verified with `npm run db:check`.
  *
  * Conventions
  * - Primary keys are `text` so that the public identifiers keep the shape the
