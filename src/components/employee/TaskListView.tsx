@@ -10,8 +10,6 @@ import { TaskCard } from "@/components/employee/TaskCard";
 import { TaskStatusControl } from "@/components/employee/TaskStatusControl";
 import { ListTodo, ArrowUpDown } from "lucide-react";
 import { TASK_PRIORITIES, TASK_STATUSES } from "@/lib/constants";
-import { updateTaskStatusAction } from "@/app/employee/actions";
-import type { ActionResult } from "@/types/common";
 import type { Task, TaskPriority, TaskStatus } from "@/types/task";
 
 const PAGE_SIZE = 6;
@@ -57,9 +55,6 @@ export function TaskListView({ tasks }: { tasks: Task[] }) {
   const totalPages = pageCountFor(filtered.length, PAGE_SIZE);
   const safePage = Math.min(page, totalPages);
   const visible = paginate(filtered, safePage, PAGE_SIZE);
-
-  const handleStatusChange = (taskId: string, nextStatus: TaskStatus): Promise<ActionResult> =>
-    updateTaskStatusAction(taskId, nextStatus);
 
   const hasFilters = query.trim() !== "" || status !== "all" || priority !== "all";
 
@@ -170,7 +165,7 @@ export function TaskListView({ tasks }: { tasks: Task[] }) {
                 task={task}
                 href={`/employee/todo/${task.id}`}
                 actions={
-                  <TaskStatusControl taskId={task.id} currentStatus={task.status} onChange={(next) => handleStatusChange(task.id, next)} />
+                  <TaskStatusControl taskId={task.id} currentStatus={task.status} />
                 }
               />
             ))}

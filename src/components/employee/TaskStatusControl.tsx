@@ -5,18 +5,16 @@ import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/Toast";
 import { Select } from "@/components/ui/Select";
 import { TASK_STATUSES } from "@/lib/constants";
-import type { ActionResult } from "@/types/common";
+import { updateTaskStatusAction } from "@/app/employee/actions";
 import type { TaskStatus } from "@/types/task";
 
 export function TaskStatusControl({
   taskId,
   currentStatus,
-  onChange,
   showLabel = true,
 }: {
   taskId: string;
   currentStatus: TaskStatus;
-  onChange: (status: TaskStatus) => Promise<ActionResult>;
   showLabel?: boolean;
 }) {
   const [pending, startTransition] = useTransition();
@@ -39,7 +37,7 @@ export function TaskStatusControl({
         onChange={(event) => {
           const next = event.target.value as TaskStatus;
           startTransition(async () => {
-            const result = await onChange(next);
+            const result = await updateTaskStatusAction(taskId, next);
             toast(result.message, result.success ? "success" : "error");
             if (result.success) router.refresh();
           });
