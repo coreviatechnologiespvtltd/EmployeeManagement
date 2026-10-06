@@ -208,12 +208,17 @@ function buildAttendance() {
         status = "present";
       }
 
+      // The late rule is strict: 10:00 AM + 15 minutes is still on time, so a late
+      // arrival has to start one minute past the threshold. `+ 1` is what keeps
+      // generated `late` rows consistent with what the app would compute.
       const lateMinutes =
-        status === "late" ? LATE_THRESHOLD_MINUTES + Math.floor(random() * 25) : Math.floor(random() * 8);
+        status === "late"
+          ? LATE_THRESHOLD_MINUTES + 1 + Math.floor(random() * 25)
+          : Math.floor(random() * 8);
       const earlyMinutes = Math.floor(random() * 40);
 
       const checkInBase = new Date(day);
-      checkInBase.setHours(9, 0, 0, 0);
+      checkInBase.setHours(10, 0, 0, 0);
       checkInBase.setMinutes(checkInBase.getMinutes() + lateMinutes);
 
       const checkOutBase = new Date(day);
@@ -581,9 +586,9 @@ async function main() {
       ["key", "value", "label"],
       [
         { key: "leave_allocation_days", value: JSON.stringify(20), label: "Annual leave allocation (days)" },
-        // `value` is jsonb, so every entry is sent as JSON text. A bare "09:00"
+        // `value` is jsonb, so every entry is sent as JSON text. A bare "10:00"
         // is not valid JSON, hence the explicit stringification.
-        { key: "workday_start", value: JSON.stringify("09:00"), label: "Standard workday start" },
+        { key: "workday_start", value: JSON.stringify("10:00"), label: "Standard workday start" },
         { key: "late_threshold_minutes", value: JSON.stringify(15), label: "Late arrival threshold (minutes)" },
         { key: "standard_working_hours", value: JSON.stringify(8), label: "Standard working hours per day" },
       ],

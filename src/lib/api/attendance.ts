@@ -1,14 +1,31 @@
 import "server-only";
 
-import { and, asc, count, desc, eq, ilike, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gte,
+  ilike,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  sql,
+} from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { attendanceSelection } from "@/lib/db/selects";
 import { likePattern, monthRange } from "@/lib/db/query-helpers";
 import { attendanceRecords, departments, employees } from "@/lib/db/schema";
 import { toAttendanceRecord, toNumber } from "@/lib/db/mappers";
 import { requireActionRole } from "@/lib/auth/actions";
-import { currentMonth, monthLabel, today } from "@/lib/format";
+import { getCompanyPolicy, type CompanyPolicy } from "@/lib/api/settings";
+import { currentMonth, localToday, monthLabel } from "@/lib/format";
+import { lateCutoffMinutes, resolveAttendanceStatus, type AttendancePolicy } from "@/lib/attendance-policy";
+import type { AuthUser } from "@/types/auth";
 import type {
+  AttendancePerson,
   AttendanceRecord,
   AttendanceStatus,
   MonthlyAttendanceSummary,
@@ -16,26 +33,70 @@ import type {
 
 export interface AttendanceFilters {
   query?: string;
+  /** Exact working day. Takes precedence over `from` / `to`. */
   date?: string;
+  /** Inclusive `YYYY-MM-DD` bounds, for the register's date range filter. */
+  from?: string;
+  to?: string;
   month?: string;
   status?: AttendanceStatus | "all";
   department?: string;
+  employeeId?: string;
 }
 
-const searchBlob = sql`concat_ws(' ', ${employees.fullName}, ${employees.id}, ${departments.name})`;
+const searchBlob = sql`concat_ws(' ', ${employees.fullName}, ${employees.username}, ${employees.id}, ${departments.name})`;
+
+/**
+ * The late cutoff expressed in UTC minutes-of-day.
+ *
+ * `check_in` is a `timestamptz`, and the rule is defined in the server's local
+ * time. Resolving the cutoff through a real `Date` means the SQL comparison and
+ * `isLateArrival()`'s `getHours()` reading agree on the same instant, whatever
+ * timezone the process or the database session happens to run in.
+ */
+function cutoffUtcMinutes(policy: AttendancePolicy): number {
+  const probe = new Date();
+  probe.setHours(0, 0, 0, 0);
+  probe.setMinutes(probe.getMinutes() + lateCutoffMinutes(policy));
+  return probe.getUTCHours() * 60 + probe.getUTCMinutes();
+}
+
+/**
+ * The status of a row, recomputed in SQL.
+ *
+ * This mirrors `resolveAttendanceStatus()` exactly so that a `status = 'late'`
+ * filter, a `count(*) filter (...)` breakdown and the badge the row renders all
+ * come from the same rule. Without it a status filter would read the stored
+ * column while the table displayed a freshly derived value, and the two would
+ * quietly disagree.
+ */
+function derivedStatus(cutoff: number) {
+  return sql<string>`case
+    when ${attendanceRecords.checkIn} is null
+      or ${attendanceRecords.status} in ('absent', 'leave', 'half_day')
+      then ${attendanceRecords.status}
+    when (
+      extract(hour from ${attendanceRecords.checkIn} at time zone 'UTC')::int * 60
+      + extract(minute from ${attendanceRecords.checkIn} at time zone 'UTC')::int
+    ) > ${cutoff}
+      then 'late'
+    else 'present'
+  end`;
+}
 
 /**
  * Conditional aggregation for one month of attendance. `count(*) filter (...)`
  * is the idiomatic Postgres way to get a per-status breakdown in a single row.
  */
-function summarySelection() {
+function summarySelection(cutoff: number) {
+  const status = derivedStatus(cutoff);
   return {
     total: count(),
-    present: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'present')`,
-    absent: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'absent')`,
-    late: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'late')`,
-    halfDay: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'half_day')`,
-    leave: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'leave')`,
+    present: sql<number>`count(*) filter (where ${status} = 'present')`,
+    absent: sql<number>`count(*) filter (where ${status} = 'absent')`,
+    late: sql<number>`count(*) filter (where ${status} = 'late')`,
+    halfDay: sql<number>`count(*) filter (where ${status} = 'half_day')`,
+    leave: sql<number>`count(*) filter (where ${status} = 'leave')`,
     totalHours: sql<string>`coalesce(sum(${attendanceRecords.workingHours}), 0)`,
     hoursCount: sql<number>`count(${attendanceRecords.workingHours})`,
   };
@@ -70,17 +131,24 @@ function summarise(row: SummaryRow | undefined, month: string): MonthlyAttendanc
   };
 }
 
+/**
+ * The caller's own record for the current working day.
+ *
+ * Scoped by `employeeId`, which the caller resolves from their own session —
+ * there is no way to read another person's day from here.
+ */
 export async function getTodayRecordForEmployee(employeeId: string): Promise<AttendanceRecord | null> {
+  const policy = await getCompanyPolicy();
   const rows = await db
     .select(attendanceSelection)
     .from(attendanceRecords)
     .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
     .innerJoin(departments, eq(employees.departmentId, departments.id))
-    .where(and(eq(attendanceRecords.employeeId, employeeId), eq(attendanceRecords.workDate, today())))
+    .where(and(eq(attendanceRecords.employeeId, employeeId), eq(attendanceRecords.workDate, localToday())))
     .limit(1);
 
   const row = rows[0];
-  return row ? toAttendanceRecord(row) : null;
+  return row ? toAttendanceRecord(row, policy) : null;
 }
 
 export async function getEmployeeAttendance(
@@ -88,6 +156,7 @@ export async function getEmployeeAttendance(
   month: string = currentMonth(),
 ): Promise<AttendanceRecord[]> {
   const { start, end } = monthRange(month);
+  const policy = await getCompanyPolicy();
 
   const rows = await db
     .select(attendanceSelection)
@@ -103,7 +172,7 @@ export async function getEmployeeAttendance(
     )
     .orderBy(desc(attendanceRecords.workDate));
 
-  return rows.map(toAttendanceRecord);
+  return rows.map((row) => toAttendanceRecord(row, policy));
 }
 
 export async function getEmployeeMonthlySummary(
@@ -111,9 +180,10 @@ export async function getEmployeeMonthlySummary(
   month: string = currentMonth(),
 ): Promise<MonthlyAttendanceSummary> {
   const { start, end } = monthRange(month);
+  const cutoff = cutoffUtcMinutes(await getCompanyPolicy());
 
   const rows = await db
-    .select(summarySelection())
+    .select(summarySelection(cutoff))
     .from(attendanceRecords)
     .where(
       and(
@@ -144,9 +214,10 @@ export async function getAttendanceTrend(
 
   const first = keys[0]!;
   const { start } = monthRange(first);
+  const cutoff = cutoffUtcMinutes(await getCompanyPolicy());
 
   const rows = await db
-    .select({ month: sql<string>`to_char(${attendanceRecords.workDate}, 'YYYY-MM')`, ...summarySelection() })
+    .select({ month: sql<string>`to_char(${attendanceRecords.workDate}, 'YYYY-MM')`, ...summarySelection(cutoff) })
     .from(attendanceRecords)
     .where(and(eq(attendanceRecords.employeeId, employeeId), sql`${attendanceRecords.workDate} >= ${start}`))
     .groupBy(sql`to_char(${attendanceRecords.workDate}, 'YYYY-MM')`);
@@ -156,41 +227,77 @@ export async function getAttendanceTrend(
   return keys.map((key) => summarise(byMonth.get(key), key));
 }
 
-function buildFilters(filters: AttendanceFilters) {
+function buildFilters(filters: AttendanceFilters, cutoff: number) {
   const conditions = [];
 
   if (filters.query) {
     conditions.push(ilike(searchBlob, likePattern(filters.query)));
   }
-  if (filters.date) {
-    conditions.push(eq(attendanceRecords.workDate, filters.date));
-  } else if (filters.month && filters.month !== "all") {
+
+  // An exact day is just a range of one, so the three date inputs collapse into
+  // one pair of inclusive bounds.
+  const from = filters.date ?? filters.from;
+  const to = filters.date ?? filters.to;
+  if (from) {
+    conditions.push(gte(attendanceRecords.workDate, from));
+  }
+  if (to) {
+    conditions.push(lte(attendanceRecords.workDate, to));
+  }
+
+  if (!from && !to && filters.month && filters.month !== "all") {
     const { start, end } = monthRange(filters.month);
     conditions.push(
       sql`${attendanceRecords.workDate} >= ${start}`,
       sql`${attendanceRecords.workDate} < ${end}`,
     );
   }
+
+  // Filtered on the derived status rather than the stored column, so filtering
+  // by "Late" returns exactly the rows that render a Late badge.
   if (filters.status && filters.status !== "all") {
-    conditions.push(eq(attendanceRecords.status, filters.status));
+    conditions.push(sql`${derivedStatus(cutoff)} = ${filters.status}`);
   }
   if (filters.department && filters.department !== "all") {
     conditions.push(eq(departments.name, filters.department));
+  }
+  if (filters.employeeId && filters.employeeId !== "all") {
+    conditions.push(eq(attendanceRecords.employeeId, filters.employeeId));
   }
 
   return conditions.length > 0 ? and(...conditions) : undefined;
 }
 
 export async function getAllAttendance(filters: AttendanceFilters = {}): Promise<AttendanceRecord[]> {
+  const policy = await getCompanyPolicy();
   const rows = await db
     .select(attendanceSelection)
     .from(attendanceRecords)
     .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
     .innerJoin(departments, eq(employees.departmentId, departments.id))
-    .where(buildFilters(filters))
+    .where(buildFilters(filters, cutoffUtcMinutes(policy)))
     .orderBy(desc(attendanceRecords.workDate), asc(employees.fullName));
 
-  return rows.map(toAttendanceRecord);
+  return rows.map((row) => toAttendanceRecord(row, policy));
+}
+
+/**
+ * How many records match the same filters, without reading them.
+ *
+ * The register shows "42 of 500 records in range" so an admin can tell a narrow
+ * search from an empty one. That second number is a `count(*)` rather than a
+ * second fetch of every row.
+ */
+export async function countAttendance(filters: AttendanceFilters = {}): Promise<number> {
+  const cutoff = cutoffUtcMinutes(await getCompanyPolicy());
+  const rows = await db
+    .select({ total: count() })
+    .from(attendanceRecords)
+    .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .where(buildFilters(filters, cutoff));
+
+  return toNumber(rows[0]?.total);
 }
 
 /**
@@ -210,22 +317,66 @@ export async function getAttendanceDates(): Promise<string[]> {
   return rows.map((row) => row.date);
 }
 
+/**
+ * The months a person actually has records in, newest first.
+ *
+ * Powers the month picker on the individual attendance pages so the history can
+ * be browsed rather than being limited to the current month.
+ */
+export async function getAttendanceMonths(employeeId: string): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ month: sql<string>`to_char(${attendanceRecords.workDate}, 'YYYY-MM')` })
+    .from(attendanceRecords)
+    .where(eq(attendanceRecords.employeeId, employeeId))
+    .orderBy(desc(sql`to_char(${attendanceRecords.workDate}, 'YYYY-MM')`));
+
+  const months = rows.map((row) => row.month);
+  const current = currentMonth();
+
+  // The current month is always offered, even before the first check-in of the
+  // month has been recorded.
+  return months.includes(current) ? months : [current, ...months];
+}
+
 export async function getTodaysAttendance(): Promise<AttendanceRecord[]> {
-  return getAllAttendance({ date: today() });
+  return getAllAttendance({ date: localToday() });
+}
+
+/**
+ * Everyone the register can be filtered by — staff and admins alike, active or
+ * not, so historical records for a deactivated account stay reachable.
+ */
+export async function listAttendancePeople(): Promise<AttendancePerson[]> {
+  const rows = await db
+    .select({
+      id: employees.id,
+      fullName: employees.fullName,
+      username: employees.username,
+      role: employees.role,
+      department: departments.name,
+    })
+    .from(employees)
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .orderBy(asc(employees.fullName));
+
+  return rows;
 }
 
 export async function getTodaysAttendanceStats() {
+  const cutoff = cutoffUtcMinutes(await getCompanyPolicy());
+  const status = derivedStatus(cutoff);
+
   const rows = await db
     .select({
-      present: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'present')`,
-      late: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'late')`,
-      absent: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'absent')`,
-      halfDay: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'half_day')`,
-      leave: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'leave')`,
+      present: sql<number>`count(*) filter (where ${status} = 'present')`,
+      late: sql<number>`count(*) filter (where ${status} = 'late')`,
+      absent: sql<number>`count(*) filter (where ${status} = 'absent')`,
+      halfDay: sql<number>`count(*) filter (where ${status} = 'half_day')`,
+      leave: sql<number>`count(*) filter (where ${status} = 'leave')`,
       total: count(),
     })
     .from(attendanceRecords)
-    .where(eq(attendanceRecords.workDate, today()));
+    .where(eq(attendanceRecords.workDate, localToday()));
 
   const row = rows[0];
   return {
@@ -238,14 +389,17 @@ export async function getTodaysAttendanceStats() {
   };
 }
 
-export async function getDepartmentAttendanceBreakdown(date: string = today()) {
+export async function getDepartmentAttendanceBreakdown(date: string = localToday()) {
+  const cutoff = cutoffUtcMinutes(await getCompanyPolicy());
+  const status = derivedStatus(cutoff);
+
   const rows = await db
     .select({
       department: departments.name,
-      present: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'present')`,
-      absent: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'absent')`,
-      late: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'late')`,
-      leave: sql<number>`count(*) filter (where ${attendanceRecords.status} = 'leave')`,
+      present: sql<number>`count(*) filter (where ${status} = 'present')`,
+      absent: sql<number>`count(*) filter (where ${status} = 'absent')`,
+      late: sql<number>`count(*) filter (where ${status} = 'late')`,
+      leave: sql<number>`count(*) filter (where ${status} = 'leave')`,
       total: count(),
     })
     .from(attendanceRecords)
@@ -267,10 +421,12 @@ export async function getDepartmentAttendanceBreakdown(date: string = today()) {
 
 export async function getMonthlySummaryForAll(month: string = currentMonth()) {
   const { start, end } = monthRange(month);
+  const cutoff = cutoffUtcMinutes(await getCompanyPolicy());
+  const status = derivedStatus(cutoff);
 
   const [rows, breakdown] = await Promise.all([
     db
-      .select(summarySelection())
+      .select(summarySelection(cutoff))
       .from(attendanceRecords)
       .where(
         and(
@@ -281,7 +437,7 @@ export async function getMonthlySummaryForAll(month: string = currentMonth()) {
     db
       .select({
         department: departments.name,
-        presentDays: sql<number>`count(*) filter (where ${attendanceRecords.status} in ('present', 'late'))`,
+        presentDays: sql<number>`count(*) filter (where ${status} in ('present', 'late'))`,
       })
       .from(attendanceRecords)
       .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
@@ -326,11 +482,90 @@ function toInstant(value: string | null | undefined): string | null {
   return parsed.toISOString();
 }
 
+/**
+ * Reads one record back through the joins that resolve names and department.
+ * Used after every write so callers get the same shape the read paths return.
+ */
+async function readRecordById(id: string): Promise<AttendanceRecord | null> {
+  const policy = await getCompanyPolicy();
+  const rows = await db
+    .select(attendanceSelection)
+    .from(attendanceRecords)
+    .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+    .innerJoin(departments, eq(employees.departmentId, departments.id))
+    .where(eq(attendanceRecords.id, id))
+    .limit(1);
+
+  const row = rows[0];
+  return row ? toAttendanceRecord(row, policy) : null;
+}
+
+/**
+ * Rewrites the stored status of every clocked day that the current policy
+ * disagrees with, and returns how many rows changed.
+ *
+ * Reading already derives the status, so this is not needed for the UI to be
+ * correct. It exists so the persisted column stops being a second, drifting
+ * source of truth: when an admin moves the cutoff from 10:15 AM to 10:00 AM,
+ * every record that recorded a 10:05 arrival is re-stamped `late` in the same
+ * request, which also keeps any external reader of the table in agreement.
+ *
+ * Absent, leave and half-day rows are skipped: those statuses are admin
+ * decisions about the day, not consequences of an arrival time.
+ */
+export async function recalculateAttendanceStatuses(policy: CompanyPolicy): Promise<number> {
+  const rows = await db
+    .select({
+      id: attendanceRecords.id,
+      checkIn: attendanceRecords.checkIn,
+      status: attendanceRecords.status,
+    })
+    .from(attendanceRecords)
+    .where(
+      and(
+        isNotNull(attendanceRecords.checkIn),
+        inArray(attendanceRecords.status, ["present", "late"]),
+      ),
+    );
+
+  const changes: { id: string; status: AttendanceStatus }[] = [];
+  for (const row of rows) {
+    const next = resolveAttendanceStatus({
+      checkIn: row.checkIn ? new Date(row.checkIn) : null,
+      requested: row.status,
+      policy,
+    });
+    if (next !== row.status) changes.push({ id: row.id, status: next });
+  }
+
+  if (changes.length === 0) return 0;
+
+  // One statement rather than a loop, so a policy change cannot leave the table
+  // half-updated if a later row fails. The `(id, status)` pairs are emitted as
+  // a literal VALUES list: passing JS arrays as bind parameters would encode
+  // them as single values rather than Postgres arrays.
+  const pairs = changes.map((c) => sql`(${c.id}::text, ${c.status}::text)`);
+
+  await db.execute(sql`
+    update attendance_records as a
+       set status = v.status, updated_at = now()
+      from (values ${sql.join(pairs, sql`, `)}) as v(id, status)
+     where a.id = v.id and a.status is distinct from v.status
+  `);
+
+  return changes.length;
+}
+
 export async function correctAttendance(input: CorrectAttendanceInput): Promise<AttendanceRecord | null> {
   await requireActionRole("admin");
 
+  const policy = await getCompanyPolicy();
   const checkIn = toInstant(input.checkIn);
   const checkOut = toInstant(input.checkOut);
+
+  if (checkIn && checkOut && new Date(checkOut) <= new Date(checkIn)) {
+    throw new Error("Check-out time must be after check-in time.");
+  }
 
   let workingHours: number | null = null;
   if (checkIn && checkOut) {
@@ -338,10 +573,19 @@ export async function correctAttendance(input: CorrectAttendanceInput): Promise<
     workingHours = hours > 0 ? Number(hours.toFixed(2)) : null;
   }
 
+  // The submitted status is a request, not the answer. For an arrival-based
+  // status the check-in time decides, so moving a late arrival back to 10:00 AM
+  // stores `present` even if the form still had "Late" selected.
+  const status = resolveAttendanceStatus({
+    checkIn: checkIn ? new Date(checkIn) : null,
+    requested: input.status,
+    policy,
+  });
+
   const updated = await db
     .update(attendanceRecords)
     .set({
-      status: input.status,
+      status,
       checkIn,
       checkOut,
       workingHours: workingHours === null ? null : String(workingHours),
@@ -353,14 +597,114 @@ export async function correctAttendance(input: CorrectAttendanceInput): Promise<
 
   if (updated.length === 0) return null;
 
-  const rows = await db
-    .select(attendanceSelection)
-    .from(attendanceRecords)
-    .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
-    .innerJoin(departments, eq(employees.departmentId, departments.id))
-    .where(eq(attendanceRecords.id, input.recordId))
-    .limit(1);
+  return readRecordById(input.recordId);
+}
 
-  const row = rows[0];
-  return row ? toAttendanceRecord(row) : null;
+/* -------------------------------------------------------------------------- */
+/* Clocking in and out                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Records the caller's check-in for the current working day.
+ *
+ * One row per person per day is a database guarantee, not a UI convention: the
+ * insert is an upsert on the unique `(employee_id, work_date)` index whose
+ * update branch only fires when the day has no check-in yet. A second click —
+ * from a double submission, a second tab, or a stale page — matches no row, so
+ * the statement returns nothing and the repeat is refused here.
+ *
+ * The status comes from the same `resolveAttendanceStatus()` the admin
+ * correction form uses, so an employee and an admin clocking in under the same
+ * policy can never end up with different rules.
+ */
+export async function checkInToday(actor: AuthUser): Promise<AttendanceRecord> {
+  await requireActionRole("employee", "admin");
+
+  const workDate = localToday();
+  const now = new Date();
+  const policy = await getCompanyPolicy();
+  const status = resolveAttendanceStatus({ checkIn: now, requested: "present", policy });
+  const stamp = now.toISOString();
+
+  const written = await db
+    .insert(attendanceRecords)
+    .values({ employeeId: actor.id, workDate, status, checkIn: stamp })
+    .onConflictDoUpdate({
+      target: [attendanceRecords.employeeId, attendanceRecords.workDate],
+      set: { checkIn: stamp, status, updatedAt: stamp },
+      setWhere: isNull(attendanceRecords.checkIn),
+    })
+    .returning({ id: attendanceRecords.id });
+
+  if (written.length === 0) {
+    throw new Error("You have already checked in today.");
+  }
+
+  const record = await readRecordById(written[0]!.id);
+  if (!record) throw new Error("Your check-in could not be read back after saving.");
+  return record;
+}
+
+/**
+ * Records the caller's check-out for the current working day and derives the
+ * working duration from the stored check-in.
+ *
+ * The write is a single conditional `UPDATE`, so the "checked out twice" and
+ * "never checked in" guards hold even if two requests arrive together. The
+ * remaining rules are enforced here: the checkout has to be later than the
+ * check-in, and the status is re-derived from the check-in time, so a day that
+ * had been marked absent or on leave is classified by when the person actually
+ * arrived rather than assumed on time.
+ */
+export async function checkOutToday(actor: AuthUser): Promise<AttendanceRecord> {
+  await requireActionRole("employee", "admin");
+
+  const workDate = localToday();
+  const now = new Date();
+
+  const policy = await getCompanyPolicy();
+  const current = await getTodayRecordForEmployee(actor.id);
+  if (!current?.checkIn) {
+    throw new Error("Check in before checking out.");
+  }
+  if (current.checkOut) {
+    throw new Error("You have already checked out today.");
+  }
+
+  const hours = (now.getTime() - new Date(current.checkIn).getTime()) / 3_600_000;
+  if (hours <= 0) {
+    throw new Error("Check-out time must be after check-in time.");
+  }
+
+  const status = resolveAttendanceStatus({
+    checkIn: new Date(current.checkIn),
+    requested: current.status,
+    policy,
+  });
+
+  const updated = await db
+    .update(attendanceRecords)
+    .set({
+      checkOut: now.toISOString(),
+      workingHours: hours.toFixed(2),
+      status,
+      updatedAt: now.toISOString(),
+    })
+    .where(
+      and(
+        eq(attendanceRecords.employeeId, actor.id),
+        eq(attendanceRecords.workDate, workDate),
+        isNotNull(attendanceRecords.checkIn),
+        isNull(attendanceRecords.checkOut),
+      ),
+    )
+    .returning({ id: attendanceRecords.id });
+
+  if (updated.length === 0) {
+    throw new Error("You have already checked out today.");
+  }
+
+  const record = await readRecordById(updated[0]!.id);
+  if (!record) throw new Error("Your check-out could not be read back after saving.");
+  return record;
 }

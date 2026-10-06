@@ -4,7 +4,7 @@ import { getEarningsSummary, getEarningsSeries } from "@/lib/api/salary";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { DashboardCard } from "@/components/ui/DashboardCard";
 import { SectionCard } from "@/components/ui/Card";
-import { DataTable } from "@/components/ui/DataTable";
+import { DataTable, FLUSH_IN_CARD } from "@/components/ui/DataTable";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { BarChart } from "@/components/charts/BarChart";
 import { DonutChart } from "@/components/charts/DonutChart";
@@ -133,7 +133,7 @@ function MonthlyBreakdownTable({ series }: { series: MonthlyEarnings[] }) {
     <DataTable
       rows={reversed}
       getRowKey={(row) => row.month}
-      className="shadow-none"
+      className={FLUSH_IN_CARD}
       caption="Monthly earnings breakdown"
       columns={[
         { key: "month", header: "Month", render: (row) => <span className="font-medium whitespace-nowrap text-ink-800">{monthLabel(row.month)}</span> },

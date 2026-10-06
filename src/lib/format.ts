@@ -86,6 +86,22 @@ export function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/**
+ * The local calendar day as `YYYY-MM-DD`.
+ *
+ * `today()` slices `toISOString()`, which is the *UTC* day — the right key for
+ * a stored timestamp, but the wrong working day for a person clocking in: at
+ * 00:30 in Nepal (UTC+05:45) `today()` still reports yesterday. Attendance
+ * derives its work date from this instead, which is also how
+ * `scripts/seed.mjs` generates dates.
+ */
+export function localToday(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
 export function initials(name: string): string {
   return name
     .split(" ")

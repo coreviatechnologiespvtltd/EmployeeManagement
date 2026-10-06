@@ -75,22 +75,24 @@ export function TaskManagementTable({ tasks }: { tasks: Task[] }) {
             label="Search tasks"
           />
           <Select
+            id="task-status"
+            label="Status"
             value={status}
             onChange={(event) => {
               setStatus(event.target.value as typeof status);
               setPage(1);
             }}
             options={[{ value: "all", label: "All statuses" }, ...TASK_STATUSES.map((s) => ({ value: s.value, label: s.label }))]}
-            aria-label="Filter by status"
           />
           <Select
+            id="task-priority"
+            label="Priority"
             value={priority}
             onChange={(event) => {
               setPriority(event.target.value as typeof priority);
               setPage(1);
             }}
             options={[{ value: "all", label: "All priorities" }, ...TASK_PRIORITIES.map((p) => ({ value: p.value, label: p.label }))]}
-            aria-label="Filter by priority"
           />
         </div>
 

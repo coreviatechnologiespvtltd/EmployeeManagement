@@ -33,7 +33,10 @@ export interface StatusMeta {
 }
 
 export const ATTENDANCE_STATUS_META: Record<AttendanceStatus, StatusMeta> = {
-  present: { label: "Present", tone: "success", icon: CheckCircle2 },
+  // "On Time" is the arrival-time status: it is derived from the check-in
+  // against the late cutoff, never from the raw `present` column value. It is
+  // green while `late` stays orange, so the two are unmistakable side by side.
+  present: { label: "On Time", tone: "success", icon: CheckCircle2 },
   absent: { label: "Absent", tone: "danger", icon: XCircle },
   late: { label: "Late", tone: "orange", icon: Clock },
   half_day: { label: "Half Day", tone: "indigo", icon: Hourglass },

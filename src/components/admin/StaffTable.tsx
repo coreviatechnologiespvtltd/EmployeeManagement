@@ -16,6 +16,7 @@ import { FormField } from "@/components/forms/FormField";
 import { FormActions, FormErrorMessage, SubmitButton } from "@/components/forms/FormActions";
 import { SearchInput } from "@/components/ui/SearchInput";
 import { DropdownMenu } from "@/components/ui/DropdownMenu";
+import { EmployeeAvatar } from "@/components/ui/EmployeeAvatar";
 import { Pagination, paginate, pageCountFor } from "@/components/ui/Pagination";
 import {
   updateStaffAction,
@@ -97,15 +98,18 @@ export function StaffTable({ employees, departments }: StaffTableProps) {
             label="Search staff"
           />
           <Select
+            id="staff-department"
+            label="Department"
             value={department}
             onChange={(event) => {
               setDepartment(event.target.value);
               setPage(1);
             }}
             options={[{ value: "all", label: "All departments" }, ...departments.map((d) => ({ value: d, label: d }))]}
-            aria-label="Filter by department"
           />
           <Select
+            id="staff-status"
+            label="Status"
             value={status}
             onChange={(event) => {
               setStatus(event.target.value as typeof status);
@@ -116,7 +120,6 @@ export function StaffTable({ employees, departments }: StaffTableProps) {
               { value: "active", label: "Active" },
               { value: "inactive", label: "Inactive" },
             ]}
-            aria-label="Filter by status"
           />
         </div>
 
@@ -165,17 +168,7 @@ export function StaffTable({ employees, departments }: StaffTableProps) {
                   <tr key={employee.id} className="transition-colors duration-150 hover:bg-surface-subtle">
                     <td className="px-5 py-3.5">
                       <div className="flex items-center gap-3">
-                        <span
-                          aria-hidden
-                          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-100 text-xs font-semibold text-brand-700"
-                        >
-                          {employee.fullName
-                            .split(" ")
-                            .slice(0, 2)
-                            .map((part) => part[0])
-                            .join("")
-                            .toUpperCase()}
-                        </span>
+                        <EmployeeAvatar name={employee.fullName} size="sm" />
                         <div className="min-w-0">
                           <p className="truncate font-medium text-ink-900">{employee.fullName}</p>
                           <p className="truncate text-xs text-ink-500">{employee.email}</p>
@@ -317,7 +310,7 @@ function EditStaffModal({
       phone: "",
       address: "",
       department: "",
-      position: "Software Engineer",
+      position: POSITIONS[0],
       joiningDate: "",
       basicSalary: 0,
       role: "employee",

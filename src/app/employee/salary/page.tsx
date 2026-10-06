@@ -4,7 +4,7 @@ import { listSalaryForEmployee, getSalaryForMonth } from "@/lib/api/salary";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { DashboardCard } from "@/components/ui/DashboardCard";
 import { SectionCard } from "@/components/ui/Card";
-import { DataTable } from "@/components/ui/DataTable";
+import { DataTable, FLUSH_IN_CARD } from "@/components/ui/DataTable";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { SalarySlipCard } from "@/components/employee/SalarySlipCard";
@@ -107,7 +107,7 @@ export default async function EmployeeSalaryPage() {
           <DataTable
             rows={history}
             getRowKey={(row) => row.id}
-            className="shadow-none"
+            className={FLUSH_IN_CARD}
             caption="Salary history"
             columns={[
               { key: "month", header: "Month", render: (row) => <span className="font-medium whitespace-nowrap text-ink-800">{monthLabel(row.month)}</span> },

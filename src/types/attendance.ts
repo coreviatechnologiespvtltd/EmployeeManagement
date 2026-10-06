@@ -1,3 +1,5 @@
+import type { Role } from "./auth";
+
 export type AttendanceStatus =
   | "present"
   | "absent"
@@ -9,6 +11,10 @@ export interface AttendanceRecord {
   id: string;
   employeeId: string;
   employeeName: string;
+  /** Sign-in name, so a register can be searched by username as well as name. */
+  employeeUsername: string;
+  /** Admins record attendance too, so the person is identified by role. */
+  employeeRole: Role;
   department: string;
   date: string;
   checkIn: string | null;
@@ -16,6 +22,17 @@ export interface AttendanceRecord {
   workingHours: number | null;
   status: AttendanceStatus;
   remarks?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The people an attendance register can be filtered by. */
+export interface AttendancePerson {
+  id: string;
+  fullName: string;
+  username: string;
+  role: Role;
+  department: string;
 }
 
 export interface MonthlyAttendanceSummary {

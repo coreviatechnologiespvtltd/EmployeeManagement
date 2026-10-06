@@ -11,6 +11,7 @@ import { DropdownMenu } from "@/components/ui/DropdownMenu";
 import { EmployeeAvatar } from "@/components/ui/EmployeeAvatar";
 import { ChangePasswordDialog } from "@/components/auth/ChangePasswordDialog";
 import { CoreviaBrand, SidebarNav, SidebarFooter } from "./sidebar-parts";
+import { CompanyLogo } from "@/components/layout/CompanyLogo";
 import { cn } from "@/lib/cn";
 import type { AuthUser } from "@/types/auth";
 import type { NavItem } from "@/lib/navigation";
@@ -121,9 +122,12 @@ export function DashboardShell({
             {collapsed ? <PanelLeftOpen aria-hidden className="h-5 w-5" /> : <PanelLeftClose aria-hidden className="h-5 w-5" />}
           </Button>
 
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold text-ink-900">Corevia Technologies</p>
-            <p className="hidden truncate text-[11px] text-ink-500 sm:block">{roleLabel}</p>
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <CompanyLogo size="sm" />
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-ink-900">Corevia Technologies</p>
+              <p className="hidden truncate text-[11px] text-ink-500 sm:block">{roleLabel}</p>
+            </div>
           </div>
 
           <DropdownMenu

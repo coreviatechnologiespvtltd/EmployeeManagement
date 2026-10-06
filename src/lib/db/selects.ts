@@ -76,6 +76,10 @@ export const attendanceSelection = {
   id: attendanceRecords.id,
   employeeId: attendanceRecords.employeeId,
   employeeName: employees.fullName,
+  // The admin register searches and reports by username as well as by name,
+  // and attendance is recorded for admins as well as for staff.
+  employeeUsername: employees.username,
+  employeeRole: employees.role,
   department: departments.name,
   workDate: attendanceRecords.workDate,
   checkIn: attendanceRecords.checkIn,
@@ -83,6 +87,8 @@ export const attendanceSelection = {
   workingHours: attendanceRecords.workingHours,
   status: attendanceRecords.status,
   remarks: attendanceRecords.remarks,
+  createdAt: attendanceRecords.createdAt,
+  updatedAt: attendanceRecords.updatedAt,
 };
 
 export const salarySelection = {
