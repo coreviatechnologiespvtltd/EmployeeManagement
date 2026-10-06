@@ -83,7 +83,7 @@ const attendanceRate =
           }
           icon={CalendarCheck2}
           tone="success"
-          href="/admin/attendance"
+          href="/admin/attendance/management"
         />
         <DashboardCard
           label="Pending Leaves"
@@ -105,14 +105,14 @@ const attendanceRate =
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <SectionCard title="Today's Attendance" description="Live status across all departments">
-          <div className="flex flex-col items-center gap-6 sm:flex-row">
+          <div className="flex flex-col items-center gap-6 sm:flex-row sm:justify-center">
             <DonutChart
               size={160}
               centerLabel="Present"
               centerValue={`${todayStats.present}/${todayStats.total}`}
               data={attendanceChart.filter((item) => item.value > 0)}
             />
-            <ul className="w-full space-y-2">
+            <ul className="w-full space-y-2 sm:hidden">
               {attendanceChart.map((item) => (
                 <li key={item.label} className="flex items-center justify-between gap-3 text-sm">
                   <span className="flex items-center gap-2 text-ink-600">

@@ -10,6 +10,7 @@ import {
   STANDARD_WORKING_HOURS,
   WORKDAY_START,
 } from "@/lib/constants";
+import type { CompanySettingsInput } from "@/lib/validations/settings";
 
 /**
  * Company policy, stored in `company_settings` instead of hardcoded in
@@ -68,6 +69,22 @@ export async function getLeaveAllocationDays(): Promise<number> {
 }
 
 /**
+ * The policy as a plain object, straight from the validated form input.
+ *
+ * `getCompanyPolicy()` is memoised per request, so it cannot be used to observe
+ * a change made earlier in the same request. A caller that has just saved new
+ * values needs the new ones back, and this reads them from what it wrote.
+ */
+export function policyFromInput(input: CompanySettingsInput): CompanyPolicy {
+  return {
+    leaveAllocationDays: input.leaveAllocationDays,
+    workdayStart: input.workdayStart,
+    lateThresholdMinutes: input.lateThresholdMinutes,
+    standardWorkingHours: input.standardWorkingHours,
+  };
+}
+
+/**
  * The shift end time, derived from the workday start and the standard day
  * length so the attendance correction form does not carry its own hardcoded
  * "18:00".
@@ -88,7 +105,24 @@ function addHours(time: string, hours: number): string {
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
-/** Writes a single policy value. Used by the seed and by future admin settings. */
+/** The keys `setCompanySetting` accepts, and the JSON shape each one stores. */
+export const COMPANY_SETTING_KEYS = [
+  "leave_allocation_days",
+  "workday_start",
+  "late_threshold_minutes",
+  "standard_working_hours",
+] as const;
+
+export type CompanySettingKey = (typeof COMPANY_SETTING_KEYS)[number];
+
+/**
+ * Writes a single policy value.
+ *
+ * Drizzle serialises the value for the `jsonb` column, so it is passed through
+ * as the plain string or number it already is. Serialising it here would store
+ * a JSON *string* rather than a JSON number or string, and `getCompanyPolicy()`
+ * would then read back the wrong type.
+ */
 export async function setCompanySetting(key: string, value: string | number): Promise<void> {
   const rows = await db
     .select({ key: companySettings.key })
@@ -100,8 +134,27 @@ export async function setCompanySetting(key: string, value: string | number): Pr
     throw new Error(`Unknown company setting: ${key}`);
   }
 
-  await db
-    .update(companySettings)
-    .set({ value, updatedAt: new Date().toISOString() })
-    .where(eq(companySettings.key, key));
+  await db.update(companySettings).set({ value }).where(eq(companySettings.key, key));
+}
+
+/**
+ * Persists the whole policy the admin form edits, in one round trip.
+ *
+ * Written as a single UPDATE rather than four calls so the policy never
+ * half-applies, and so `updated_at` moves together across the four rows.
+ */
+export async function saveCompanyPolicy(input: CompanyPolicy): Promise<void> {
+  const values: Record<CompanySettingKey, string | number> = {
+    leave_allocation_days: input.leaveAllocationDays,
+    workday_start: input.workdayStart,
+    late_threshold_minutes: input.lateThresholdMinutes,
+    standard_working_hours: input.standardWorkingHours,
+  };
+
+  for (const key of COMPANY_SETTING_KEYS) {
+    await db
+      .update(companySettings)
+      .set({ value: values[key] })
+      .where(eq(companySettings.key, key));
+  }
 }

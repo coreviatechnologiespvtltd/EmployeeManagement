@@ -2,11 +2,24 @@ import type { Route } from "next";
 import type { NavIconKey } from "@/components/layout/nav-icons";
 import type { Role } from "@/types/auth";
 
+export interface NavChild {
+  label: string;
+  href: Route;
+  /** Match the child exactly rather than as a prefix. */
+  end?: boolean;
+}
+
 export interface NavItem {
   label: string;
   href: Route;
   icon: NavIconKey;
   end?: boolean;
+  /**
+   * Sub-pages rendered as an expandable group. The parent's `href` stays the
+   * canonical landing page, so the group still resolves to somewhere real when
+   * it is collapsed.
+   */
+  children?: NavChild[];
 }
 
 export const EMPLOYEE_NAV: NavItem[] = [
@@ -28,7 +41,16 @@ export const ADMIN_NAV: NavItem[] = [
   { label: "Salary Management", href: "/admin/salary", icon: "walletCards" },
   { label: "Register Staff", href: "/admin/staff/register", icon: "userPlus" },
   { label: "Assign Task", href: "/admin/tasks/create", icon: "tasks" },
-  { label: "Attendance Management", href: "/admin/attendance", icon: "attendance" },
+  {
+    label: "Attendance",
+    href: "/admin/attendance",
+    icon: "attendance",
+    children: [
+      { label: "Attendance", href: "/admin/attendance", end: true },
+      { label: "Attendance Management", href: "/admin/attendance/management" },
+    ],
+  },
+  { label: "Settings", href: "/admin/settings", icon: "settings" },
 ];
 
 export const ROLE_HOME: Record<Role, Route> = {

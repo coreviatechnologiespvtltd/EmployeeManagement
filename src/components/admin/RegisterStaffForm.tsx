@@ -55,7 +55,7 @@ export function RegisterStaffForm({ departments }: RegisterStaffFormProps) {
       // Prefilled from the database, with a fallback for the case where no
       // department has been created yet.
       department: departments[0] ?? "",
-      position: "Software Engineer",
+      position: POSITIONS[0],
       joiningDate: today(),
       basicSalary: 0,
       role: "employee",

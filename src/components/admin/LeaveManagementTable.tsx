@@ -110,13 +110,14 @@ export function LeaveManagementTable({ requests }: { requests: LeaveRequest[] })
             label="Search leave requests"
           />
           <Select
+            id="leave-type"
+            label="Leave type"
             value={leaveType}
             onChange={(event) => {
               setLeaveType(event.target.value);
               setPage(1);
             }}
             options={[{ value: "all", label: "All leave types" }, ...LEAVE_TYPES.map((t) => ({ value: t.value, label: t.label }))]}
-            aria-label="Filter by leave type"
           />
         </div>
 

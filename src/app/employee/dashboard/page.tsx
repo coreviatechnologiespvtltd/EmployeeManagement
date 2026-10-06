@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/Badge";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { SectionCard } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { DataTable } from "@/components/ui/DataTable";
+import { DataTable, FLUSH_IN_CARD } from "@/components/ui/DataTable";
 import { AnnouncementList } from "@/components/employee/AnnouncementList";
 import { TaskCard } from "@/components/employee/TaskCard";
 import { CheckCircle2, ListTodo, Plane, Wallet, TrendingUp, CalendarCheck2, ArrowUpRight } from "lucide-react";
@@ -169,7 +169,7 @@ export default async function EmployeeDashboardPage() {
             <DataTable
               rows={data.recentLeaves}
               getRowKey={(row: LeaveRequest) => row.id}
-              className="shadow-none"
+              className={FLUSH_IN_CARD}
               columns={[
                 {
                   key: "type",

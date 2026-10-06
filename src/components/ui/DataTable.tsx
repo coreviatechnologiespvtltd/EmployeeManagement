@@ -18,6 +18,14 @@ const hideClasses = {
   xl: "hidden xl:table-cell",
 } as const;
 
+/**
+ * Applied when the table is dropped into a `SectionCard` rendered with
+ * `bodyClassName="p-0"`. The card already draws the border, radius and shadow,
+ * so keeping the table's own frame produces a doubled outline with square
+ * corners inside a rounded card.
+ */
+export const FLUSH_IN_CARD = "rounded-none border-0 shadow-none";
+
 export interface DataTableProps<T> {
   columns: Column<T>[];
   rows: T[];

@@ -62,6 +62,8 @@ export function SalaryManagementTable({
             label="Search salary records"
           />
           <Select
+            id="salary-month"
+            label="Month"
             value={month}
             onChange={(event) => {
               const next = event.target.value;
@@ -69,16 +71,16 @@ export function SalaryManagementTable({
               router.push(`?month=${next}`);
             }}
             options={months.map((m) => ({ value: m, label: monthLabel(m) }))}
-            aria-label="Select salary month"
           />
           <Select
+            id="salary-status"
+            label="Payment status"
             value={paymentStatus}
             onChange={(event) => setPaymentStatus(event.target.value as typeof paymentStatus)}
             options={[
               { value: "all", label: "All payment statuses" },
               ...PAYMENT_STATUSES.map((s) => ({ value: s.value, label: s.label })),
             ]}
-            aria-label="Filter by payment status"
           />
         </div>
 

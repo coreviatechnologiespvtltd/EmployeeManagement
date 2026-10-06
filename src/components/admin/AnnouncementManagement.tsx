@@ -89,13 +89,14 @@ export function AnnouncementManagement({
             label="Search announcements"
           />
           <Select
+            id="announcement-priority"
+            label="Priority"
             value={priority}
             onChange={(event) => setPriority(event.target.value as typeof priority)}
             options={[
               { value: "all", label: "All priorities" },
               ...ANNOUNCEMENT_PRIORITIES.map((p) => ({ value: p.value, label: p.label })),
             ]}
-            aria-label="Filter by priority"
           />
         </div>
         <p className="text-xs text-ink-500">

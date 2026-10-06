@@ -10,6 +10,7 @@
  * ISO strings, which is exactly what `formatDate` / `formatTime` already take.
  */
 
+import { resolveAttendanceStatus, type AttendancePolicy } from "@/lib/attendance-policy";
 import type { Role } from "@/types/auth";
 import type { Employee, EmployeeStatus } from "@/types/employee";
 import type { Task, TaskPriority, TaskStatus } from "@/types/task";
@@ -131,6 +132,8 @@ export interface AttendanceSource {
   id: string;
   employeeId: string;
   employeeName: string;
+  employeeUsername: string;
+  employeeRole: Role;
   department: string;
   workDate: string;
   checkIn: string | null;
@@ -138,20 +141,36 @@ export interface AttendanceSource {
   workingHours: string | number | null;
   status: AttendanceStatus;
   remarks: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export function toAttendanceRecord(row: AttendanceSource): AttendanceRecord {
+export function toAttendanceRecord(
+  row: AttendanceSource,
+  policy: AttendancePolicy,
+): AttendanceRecord {
   return {
     id: row.id,
     employeeId: row.employeeId,
     employeeName: row.employeeName,
+    employeeUsername: row.employeeUsername,
+    employeeRole: row.employeeRole,
     department: row.department,
     date: row.workDate,
     checkIn: row.checkIn,
     checkOut: row.checkOut,
     workingHours: row.workingHours === null ? null : toNumber(row.workingHours),
-    status: row.status,
+    // Re-derived from the check-in on every read. The column is what was
+    // written, but the displayed status must follow the check-in time even if
+    // the stored value is older than the current late cutoff.
+    status: resolveAttendanceStatus({
+      checkIn: row.checkIn ? new Date(row.checkIn) : null,
+      requested: row.status,
+      policy,
+    }),
     remarks: optional(row.remarks),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 

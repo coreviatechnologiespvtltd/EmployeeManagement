@@ -1,34 +1,22 @@
-import { DataTable } from "@/components/ui/DataTable";
+import { DataTable, FLUSH_IN_CARD } from "@/components/ui/DataTable";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatTime, formatHours } from "@/lib/format";
 import { ATTENDANCE_STATUS_META } from "@/lib/status";
 import type { AttendanceRecord } from "@/types/attendance";
 
-export function AttendanceTable({
-  records,
-  showEmployee = false,
-}: {
-  records: AttendanceRecord[];
-  showEmployee?: boolean;
-}) {
+/**
+ * One person's own attendance history: date, check-in, check-out, working
+ * duration and status. Shared by the employee and admin attendance pages, which
+ * are the same view for whoever is signed in.
+ */
+export function AttendanceTable({ records }: { records: AttendanceRecord[] }) {
   return (
     <DataTable
       rows={records}
       getRowKey={(row) => row.id}
-      className="shadow-none"
+      className={FLUSH_IN_CARD}
       caption="Attendance history"
       columns={[
-        ...(showEmployee
-          ? [
-              {
-                key: "employee",
-                header: "Employee",
-                render: (row: AttendanceRecord) => (
-                  <span className="font-medium whitespace-nowrap text-ink-800">{row.employeeName}</span>
-                ),
-              },
-            ]
-          : []),
         {
           key: "date",
           header: "Date",

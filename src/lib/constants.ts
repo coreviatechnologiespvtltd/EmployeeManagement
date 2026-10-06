@@ -42,7 +42,7 @@ export const TASK_STATUSES = [
 ] as const;
 
 export const ATTENDANCE_STATUSES = [
-  { value: "present", label: "Present" },
+  { value: "present", label: "On Time" },
   { value: "absent", label: "Absent" },
   { value: "late", label: "Late" },
   { value: "half_day", label: "Half Day" },
@@ -73,8 +73,8 @@ export const PAYMENT_STATUSES = [
 // settings rows are missing — read them through `getCompanyPolicy()` in
 // `lib/api/settings`, never directly.
 export const LEAVE_ALLOCATION_DAYS = 18;
-export const WORKDAY_START = "09:00";
+export const WORKDAY_START = "10:00";
 export const LATE_THRESHOLD_MINUTES = 15;
 export const STANDARD_WORKING_HOURS = 8;
 
-export const COMPANY_EMAIL_DOMAIN = "corevia.com";
+export const COMPANY_EMAIL_DOMAIN = "coreviatechnologiespvtltd@gmail.com";

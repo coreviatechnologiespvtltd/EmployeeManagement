@@ -183,7 +183,9 @@ export const tasks = pgTable(
 export const attendanceRecords = pgTable(
   "attendance_records",
   {
-    id: text("id").primaryKey(),
+    // Assigned by the database, exactly like every other table. A check-in
+    // therefore never has to invent an id in application code.
+    id: text("id").primaryKey().default(sql`'att-' || nextval('attendance_records_id_seq')`),
     employeeId: text("employee_id")
       .notNull()
       .references(() => employees.id, { onDelete: "cascade" }),

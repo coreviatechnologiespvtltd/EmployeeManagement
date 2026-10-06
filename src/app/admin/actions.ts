@@ -12,7 +12,8 @@ import {
 import { createTasks, updateTaskFromAdmin, deleteTask } from "@/lib/api/tasks";
 import { decideLeave } from "@/lib/api/leaves";
 import { upsertSalary, markSalaryPaid } from "@/lib/api/salary";
-import { correctAttendance } from "@/lib/api/attendance";
+import { correctAttendance, recalculateAttendanceStatuses } from "@/lib/api/attendance";
+import { policyFromInput, saveCompanyPolicy } from "@/lib/api/settings";
 import {
   createAnnouncement,
   updateAnnouncement,
@@ -20,11 +21,14 @@ import {
   deleteAnnouncement,
 } from "@/lib/api/announcements";
 import { registerStaffSchema, editStaffSchema } from "@/lib/validations/employee";
+import { companySettingsSchema } from "@/lib/validations/settings";
 import { resetPasswordSchema } from "@/lib/validations/auth";
 import { createTaskSchema, editTaskSchema } from "@/lib/validations/task";
 import { announcementSchema } from "@/lib/validations/announcement";
 import { salaryRecordSchema, attendanceCorrectionSchema } from "@/lib/validations/salary";
-import { monthLabel } from "@/lib/format";
+import { formatTime, monthLabel } from "@/lib/format";
+import { lateCutoffLabel } from "@/lib/attendance-policy";
+import { ATTENDANCE_STATUS_META } from "@/lib/status";
 import type { ActionResult } from "@/types/common";
 import type { AnnouncementInput } from "@/lib/api/announcements";
 import type { UpsertSalaryInput } from "@/lib/api/salary";
@@ -45,6 +49,8 @@ function revalidateAdmin() {
   revalidatePath("/admin/leaves");
   revalidatePath("/admin/salary");
   revalidatePath("/admin/attendance");
+  revalidatePath("/admin/attendance/management");
+  revalidatePath("/admin/settings");
   revalidatePath("/employee/dashboard");
   revalidatePath("/employee/notices");
   revalidatePath("/employee/todo");
@@ -279,5 +285,52 @@ export async function correctAttendanceAction(input: unknown): Promise<ActionRes
   if (!record) return { success: false, message: "Attendance record not found for that date." };
 
   revalidateAdmin();
-  return { success: true, message: `Attendance corrected for ${record.employeeName}.` };
+
+  // Naming the status the server landed on, rather than the one the form sent,
+  // is what makes a late-arrival correction legible: the admin sees the label
+  // the record now carries, not the option that happened to be selected.
+  const meta = ATTENDANCE_STATUS_META[record.status];
+  const detail = record.checkIn ? ` Check-in ${formatTime(record.checkIn)} is recorded as ${meta.label}.` : "";
+  return {
+    success: true,
+    message: `Attendance corrected for ${record.employeeName}.${detail}`,
+  };
+}
+
+/* ------------------------------ Settings ------------------------------- */
+
+/**
+ * Saves the company policy and re-derives every stored attendance status.
+ *
+ * The recalculation is the point of this action rather than a side effect: the
+ * late cutoff is the input to the late rule, so moving it invalidates the status
+ * of every past record. Doing it here means the table, the register filters and
+ * the summary cards all agree the moment the admin saves, instead of only for
+ * records someone happens to touch next.
+ */
+export async function updateCompanySettingsAction(input: unknown): Promise<ActionResult<{ recalculated: number }>> {
+  const parsed = companySettingsSchema.safeParse(input);
+  if (!parsed.success) {
+    return { success: false, message: "Please correct the highlighted fields.", fieldErrors: fieldErrors(parsed.error) };
+  }
+
+  await requireActionRole("admin");
+
+  try {
+    await saveCompanyPolicy(parsed.data);
+    // The policy as just saved, not the memoised one from earlier in this
+    // request, so the sweep runs against the new cutoff.
+    const recalculated = await recalculateAttendanceStatuses(policyFromInput(parsed.data));
+
+    revalidateAdmin();
+    return {
+      success: true,
+      message: recalculated > 0
+        ? `Settings saved. ${recalculated} attendance record${recalculated === 1 ? "" : "s"} recalculated as ${lateCutoffLabel(policyFromInput(parsed.data))} is the new late cutoff.`
+        : `Settings saved. No attendance records needed recalculating.`,
+      data: { recalculated },
+    };
+  } catch (error) {
+    return { success: false, message: error instanceof Error ? error.message : "Unable to save settings." };
+  }
 }

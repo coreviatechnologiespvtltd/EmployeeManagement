@@ -4,6 +4,7 @@ import { getCurrentUser } from "@/lib/auth/service";
 import { ROLE_HOME } from "@/lib/navigation";
 import { LoginForm } from "@/components/auth/LoginForm";
 import { APP_NAME, APP_SYSTEM_NAME } from "@/lib/constants";
+import { CompanyLogo } from "@/components/layout/CompanyLogo";
 
 export const metadata: Metadata = {
   title: "Sign in",
@@ -22,9 +23,7 @@ export default async function LoginPage() {
 
       <main className="relative w-full max-w-[26rem]">
         <div className="text-center">
-          <span className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-600 text-lg font-bold text-white shadow-sm">
-            C
-          </span>
+          <CompanyLogo size="lg" priority className="mx-auto" />
           <p className="mt-4 text-sm font-semibold tracking-wide text-ink-900 uppercase">{APP_NAME}</p>
           <p className="mt-1 text-xs text-ink-500">{APP_SYSTEM_NAME}</p>
         </div>
